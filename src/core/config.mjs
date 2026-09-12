@@ -129,7 +129,18 @@ export const DEFAULTS = {
     whatsappWeb:      { enabled: false, groupName: '', sessionDir: '', routes: {} },
     whatsappGreen:    { enabled: false, apiUrl: 'https://api.green-api.com', idInstance: '', apiToken: '@vault:whatsappGreen.apiToken', chatId: '', routes: {} },
     whatsappWaha:     { enabled: false, baseUrl: 'http://127.0.0.1:3000', session: 'default', apiKey: '@vault:whatsappWaha.apiKey', chatId: '', routes: {} },
-    whatsappCloud:    { enabled: false, phoneNumberId: '', accessToken: '@vault:whatsappCloud.accessToken', to: '', recipientType: 'individual', apiVersion: 'v21.0', routes: {} },
+    whatsappCloud: {
+      enabled: false,
+      phoneNumberId: '',
+      accessToken: '@vault:whatsappCloud.accessToken',
+      to: '',                        // group id when recipientType is 'group', else a phone number
+      recipientType: 'individual',   // 'group' | 'individual'
+      apiVersion: 'v21.0',
+      // Required for alarms raised outside Meta's 24-hour messaging window — which is
+      // most overnight alarms. Body must be a single {{1}} variable.
+      template: { name: '', languageCode: 'en' },
+      routes: {},
+    },
     whatsappCallmebot:{ enabled: false, phone: '', apiKey: '@vault:whatsappCallmebot.apiKey', routes: {} },
 
     telegram:    { enabled: false, botToken: '@vault:telegram.botToken', chatId: '', threadId: '', routes: {} },
@@ -138,6 +149,54 @@ export const DEFAULTS = {
     discord:     { enabled: false, webhookUrl: '@vault:discord.webhookUrl', routes: {} },
     webhook:     { enabled: false, url: '', method: 'POST', headers: {}, secret: '@vault:webhook.secret', routes: {} },
     email:       { enabled: false, host: '', port: 587, secure: false, user: '', pass: '@vault:email.pass', from: '', to: [], routes: {} },
+  },
+
+  /**
+   * Alarm management — ISA-18.2 / EEMUA 191.
+   */
+  alarms: {
+    enabled: true,
+    // Operator positions the alarm load is shared across. EEMUA's rate targets are
+    // per position, so a control room with two operators tolerates twice the rate.
+    operatorPositions: 1,
+    // Active longer than this and an alarm is "standing" — it has become wallpaper.
+    standingAfterHours: 24,
+    // Shelving is always temporary. This is the hard cap, whatever an operator asks for.
+    maxShelveHours: 24,
+    defaultShelveHours: 4,
+    // Chattering: this many state changes inside the window marks the alarm unstable.
+    chatterWindowMin: 10,
+    chatterCount: 6,
+    // Flood threshold per 10-minute period, per EEMUA 191.
+    floodPer10Min: 10,
+    // Drop finished alarm instances from the register after this long.
+    pruneAfterDays: 7,
+    // Alarms at or above this priority are annunciated to remote channels; the rest
+    // are recorded and shown on the dashboard only.
+    annunciateAtOrAbove: 'low',
+  },
+
+  /**
+   * The periodic all-device report.
+   */
+  reporting: {
+    enabled: true,
+    // 'interval' — every N minutes; 'times' — at fixed site-local wall-clock times.
+    mode: 'times',
+    times: ['06:00', '14:00', '22:00'],
+    intervalMinutes: 360,
+    // Include every device in the text report, not just the faulty ones. This is the
+    // difference between "what is broken" and "what was checked", and only the second
+    // proves coverage.
+    fullRegister: true,
+    formats: ['text', 'html', 'csv', 'json'],
+    // Channels the report is sent to. Empty means every enabled channel.
+    channels: [],
+    maxChars: 3500,
+    retentionDays: 365,
+    // Send the report even when nothing is wrong. Recommended: a report that only
+    // arrives when there is bad news cannot be distinguished from a dead monitor.
+    sendWhenHealthy: true,
   },
 
   retention: {
@@ -151,6 +210,11 @@ export const DEFAULTS = {
 };
 
 const isObj = (v) => v && typeof v === 'object' && !Array.isArray(v);
+
+const PRIORITY_TO_SEVERITY_KEYS = ['diagnostic', 'low', 'medium', 'high', 'critical'];
+const remoteChannelNames = (cfg) => Object.entries(cfg.channels ?? {})
+  .filter(([k, c]) => c?.enabled && !['dashboard', 'console', 'desktop'].includes(k))
+  .map(([k]) => k);
 
 /** Deep merge `patch` onto `base`. Arrays replace wholesale; objects merge by key. */
 export function deepMerge(base, patch) {
@@ -217,13 +281,58 @@ export function validate(cfg) {
     errors.push('at least one authoritative probe layer (tcp/onvif/rtsp/vendor) must be enabled — ICMP alone cannot decide a camera is down');
   }
 
+  if (cfg.alarms?.enabled) {
+    if (!Number.isInteger(cfg.alarms.operatorPositions) || cfg.alarms.operatorPositions < 1) {
+      errors.push('alarms.operatorPositions must be a positive integer');
+    }
+    if (!sev.includes(PRIORITY_TO_SEVERITY_KEYS.includes(cfg.alarms.annunciateAtOrAbove) ? 'info' : 'info')
+        && !['diagnostic', 'low', 'medium', 'high', 'critical'].includes(cfg.alarms.annunciateAtOrAbove)) {
+      errors.push('alarms.annunciateAtOrAbove must be one of diagnostic, low, medium, high, critical');
+    }
+    if (cfg.alarms.maxShelveHours > 168) {
+      warnings.push('alarms.maxShelveHours above a week effectively allows an alarm to be silenced indefinitely');
+    }
+    if (cfg.alarms.chatterCount < 3) {
+      warnings.push('alarms.chatterCount below 3 will flag normal transitions as chattering');
+    }
+  }
+
+  const rep = cfg.reporting;
+  if (rep?.enabled) {
+    if (!['interval', 'times'].includes(rep.mode)) errors.push("reporting.mode must be 'interval' or 'times'");
+    if (rep.mode === 'times') {
+      if (!rep.times?.length) errors.push('reporting.times must list at least one HH:MM time when mode is "times"');
+      for (const t of rep.times ?? []) if (parseHHMM(t) === null) errors.push(`reporting.times entry "${t}" must be HH:MM`);
+    } else if (!Number.isFinite(rep.intervalMinutes) || rep.intervalMinutes < 5) {
+      errors.push('reporting.intervalMinutes must be at least 5');
+    }
+    const known = ['text', 'html', 'csv', 'alarm-csv', 'json'];
+    for (const f of rep.formats ?? []) if (!known.includes(f)) errors.push(`reporting.formats entry "${f}" is not one of ${known.join(', ')}`);
+    if (!rep.formats?.includes('text') && (rep.channels?.length || !remoteChannelNames(cfg).length === false)) {
+      warnings.push('reporting.formats does not include "text"; chat channels such as WhatsApp and Telegram can only send the text rendering');
+    }
+    if (rep.fullRegister === false) {
+      warnings.push('reporting.fullRegister is off — the report will list faults only, and will not evidence which devices were actually checked');
+    }
+  }
+
   const enabled = Object.entries(cfg.channels ?? {}).filter(([, c]) => c?.enabled).map(([k]) => k);
   const remote = enabled.filter((k) => !['dashboard', 'console', 'desktop'].includes(k));
   if (cfg.alerts?.enabled && remote.length === 0) {
     warnings.push('no off-box alert channel is enabled — alerts will not leave this PC. Enable WhatsApp, Telegram or email.');
   }
-  if (cfg.channels?.whatsappCloud?.enabled && cfg.channels.whatsappCloud.recipientType === 'group') {
-    warnings.push("WhatsApp Cloud API groups are capped at 8 participants and require an Official Business Account; most ops groups exceed this");
+  const wac = cfg.channels?.whatsappCloud;
+  if (wac?.enabled) {
+    if (wac.recipientType === 'group') {
+      warnings.push('WhatsApp Cloud API groups are capped at 8 participants — keep the group to a duty roster');
+    }
+    if (!wac.template?.name) {
+      warnings.push(
+        'channels.whatsappCloud has no template configured: Meta refuses free-form text outside its '
+        + '24-hour messaging window, so overnight alarms will not be delivered. Configure an approved '
+        + 'UTILITY template with a single {{1}} body variable.',
+      );
+    }
   }
   return { errors, warnings };
 }

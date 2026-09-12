@@ -66,6 +66,10 @@ export async function probeCamera(camera, cfg, ctx = {}) {
   const p = cfg.probe;
   const layers = {};
   const warnings = [];
+  // Structured counterpart to `warnings`: the alarm mapper keys off `code`, so alarm
+  // raising never depends on pattern-matching a human-readable string.
+  const findings = [];
+  const finding = (code, detail, value) => { findings.push({ code, detail, value }); warnings.push(detail); };
   let hostAlive = false;
 
   const result = {
@@ -79,6 +83,7 @@ export async function probeCamera(camera, cfg, ctx = {}) {
     detail: null,
     layers,
     warnings,
+    findings,
     latencyMs: null,
     durationMs: 0,
   };
@@ -90,7 +95,7 @@ export async function probeCamera(camera, cfg, ctx = {}) {
       if (layers.icmp.ok) {
         hostAlive = true;
         result.latencyMs = layers.icmp.rttMs;
-        if (layers.icmp.rttMs > 200) warnings.push(`high latency ${layers.icmp.rttMs}ms`);
+        if (layers.icmp.rttMs > 200) finding('HIGH_LATENCY', `high latency ${layers.icmp.rttMs}ms`, layers.icmp.rttMs);
       }
     }
 
@@ -112,7 +117,7 @@ export async function probeCamera(camera, cfg, ctx = {}) {
         hostAlive = true;
         result.latencyMs ??= layers.onvif.latencyMs;
         if (Number.isFinite(layers.onvif.driftSec) && Math.abs(layers.onvif.driftSec) > 60) {
-          warnings.push(`clock drift ${layers.onvif.driftSec}s — recorded footage will carry the wrong time`);
+          finding('CLOCK_DRIFT', `clock drift ${layers.onvif.driftSec}s — recorded footage will carry the wrong time`, layers.onvif.driftSec);
         }
       }
     }
@@ -135,13 +140,13 @@ export async function probeCamera(camera, cfg, ctx = {}) {
         // Configuration drift: a camera that silently reverted to a lower profile
         // after a power event still "works" and is quietly useless as evidence.
         if (camera.expectedCodec && layers.rtsp.videoCodec && layers.rtsp.videoCodec !== camera.expectedCodec) {
-          warnings.push(`codec changed: expected ${camera.expectedCodec}, serving ${layers.rtsp.videoCodec}`);
+          finding('CODEC_DRIFT', `codec changed: expected ${camera.expectedCodec}, serving ${layers.rtsp.videoCodec}`, layers.rtsp.videoCodec);
         }
         if (camera.expectedResolution && layers.rtsp.videoDimensions && layers.rtsp.videoDimensions !== camera.expectedResolution) {
-          warnings.push(`resolution changed: expected ${camera.expectedResolution}, serving ${layers.rtsp.videoDimensions}`);
+          finding('RESOLUTION_DRIFT', `resolution changed: expected ${camera.expectedResolution}, serving ${layers.rtsp.videoDimensions}`, layers.rtsp.videoDimensions);
         }
       } else if (layers.rtsp.reason === 'auth') {
-        warnings.push('RTSP credentials rejected');
+        finding('AUTH_FAIL', 'RTSP credentials rejected');
       }
     }
 
@@ -158,7 +163,17 @@ export async function probeCamera(camera, cfg, ctx = {}) {
           });
           if (layers.vendor.ok) {
             hostAlive = true;
-            for (const w of layers.vendor.warnings ?? []) warnings.push(w);
+            for (const f of layers.vendor.findings ?? []) finding(f.code, f.detail, f.value);
+            // Adapters without structured findings still surface their prose warnings.
+            if (!layers.vendor.findings) for (const w of layers.vendor.warnings ?? []) warnings.push(w);
+            if (layers.vendor.reason === 'auth') finding('AUTH_FAIL', 'vendor API credentials rejected');
+            // Uptime running backwards means the camera restarted between cycles.
+            const prevUptime = ctx.history?.uptimeSec;
+            if (Number.isFinite(layers.vendor.uptimeSec) && Number.isFinite(prevUptime)
+                && layers.vendor.uptimeSec < prevUptime - 60) {
+              finding('REBOOT', `camera restarted (uptime went from ${prevUptime}s to ${layers.vendor.uptimeSec}s)`, layers.vendor.uptimeSec);
+            }
+            result.uptimeSec = layers.vendor.uptimeSec ?? null;
           }
         } catch (err) {
           layers.vendor = { ok: false, reason: 'error', detail: String(err?.message ?? err) };
@@ -182,7 +197,13 @@ export async function probeCamera(camera, cfg, ctx = {}) {
         history: ctx.history?.snapshot ?? {},
       });
       if (layers.snapshot.degraded) {
-        warnings.push(`image ${layers.snapshot.verdict}${layers.snapshot.meanLuma !== undefined ? ` (luma ${layers.snapshot.meanLuma}, variance ${layers.snapshot.variance})` : ''}`);
+        const measured = layers.snapshot.meanLuma !== undefined
+          ? ` (luma ${layers.snapshot.meanLuma}, variance ${layers.snapshot.variance})` : '';
+        const code = {
+          black: 'IMAGE_BLACK', frozen: 'IMAGE_FROZEN', flat: 'IMAGE_FLAT',
+          'washed-out': 'IMAGE_WASHED_OUT', tiny: 'IMAGE_INVALID',
+        }[layers.snapshot.verdict] ?? 'IMAGE_DEGRADED';
+        finding(code, `image ${layers.snapshot.verdict}${measured}`, layers.snapshot.meanLuma ?? null);
       }
     }
 
@@ -200,6 +221,7 @@ export async function probeCamera(camera, cfg, ctx = {}) {
       const imageBad = layers.snapshot?.degraded === true;
       const streamBad = p.rtsp.enabled && streamOk === false;
       if (imageBad || streamBad) {
+        if (streamBad) finding('STREAM_FAIL', `RTSP ${layers.rtsp.reason ?? 'failed'} — the camera is not serving video`, layers.rtsp.reason);
         result.status = STATUS.DEGRADED;
         result.reason = imageBad ? `image-${layers.snapshot.verdict}` : `stream-${layers.rtsp.reason ?? 'failed'}`;
         result.detail = imageBad
@@ -215,6 +237,7 @@ export async function probeCamera(camera, cfg, ctx = {}) {
       result.detail = result.reason === 'auth'
         ? 'host is up but rejected our credentials — check the camera password'
         : 'host is up but no camera service responded — the camera may be booting or its application has crashed';
+      finding(result.reason === 'auth' ? 'AUTH_FAIL' : 'SERVICES_DOWN', result.detail);
     } else {
       result.status = STATUS.DOWN;
       const tcpReason = layers.tcp?.reason;
@@ -239,7 +262,7 @@ export function probeCameraBounded(camera, cfg, ctx) {
     .catch((err) => ({
       cameraId: camera.id, name: camera.name, host: camera.host, group: camera.group ?? null,
       at: Date.now(), status: STATUS.UNKNOWN, reason: 'budget-exceeded',
-      detail: String(err?.message ?? err), layers: {}, warnings: [], latencyMs: null,
+      detail: String(err?.message ?? err), layers: {}, warnings: [], findings: [], latencyMs: null,
       durationMs: cfg.monitor.cameraTimeoutMs,
     }));
 }

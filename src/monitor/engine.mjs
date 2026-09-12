@@ -30,6 +30,11 @@ import { cameraAvailability, fleetTrend, dailyAvailability } from './metrics.mjs
 import { AlertBus } from '../alerts/bus.mjs';
 import { createChannels, drainQueue } from '../alerts/channels/index.mjs';
 import { buildDigest, buildStatusReport } from '../core/format.mjs';
+import { AlarmRegister } from '../alarms/register.mjs';
+import { conditionsFor, systemConditions } from '../alarms/mapper.mjs';
+import { alarmKpis } from '../alarms/kpi.mjs';
+import { produceReport, nextDue } from '../report/scheduler.mjs';
+import { stats as queueStats } from '../alerts/queue.mjs';
 import { minuteOfDay, dayKey } from '../core/time.mjs';
 import { getSecret } from '../core/secrets.mjs';
 
@@ -45,6 +50,7 @@ export class Engine extends EventEmitter {
     // dashboard alert.
     this.channels = createChannels({ broadcast: (event, data) => this.broadcast(event, data) });
     this.bus = null;
+    this.register = null;          // the alarm register
     this.timers = {};
     this.running = false;
     this.cycleCount = 0;
@@ -57,6 +63,13 @@ export class Engine extends EventEmitter {
     this.running = true;
     const state = await loadState();
     this.bus = new AlertBus(this.cfg, this.channels, { state });
+
+    // The alarm register annunciates through the same bus, so alarms inherit quiet
+    // hours, coalescing, routing and rate limiting rather than bypassing them.
+    this.register = new AlarmRegister({
+      cfg: this.cfg,
+      notify: (alarmEvent) => this.#onAlarm(alarmEvent),
+    }).load(state.alarms ?? {});
 
     // Was the monitor down while it was not running? Say so — a silent gap in the
     // history is indistinguishable from "everything was fine".
@@ -88,6 +101,36 @@ export class Engine extends EventEmitter {
     this.timers.queue = setInterval(() => this.#drain(), 5_000);
     this.timers.watchdog = setInterval(() => this.#watchdog(), 30_000);
     this.timers.housekeeping = setInterval(() => this.#housekeeping(), 60_000);
+  }
+
+  /**
+   * Called by the register for every transition worth annunciating. Buffered so a
+   * whole cycle's alarms reach the bus as one batch and coalesce properly.
+   */
+  #onAlarm(alarmEvent) {
+    const floor = this.cfg.alarms?.annunciateAtOrAbove ?? 'low';
+    const rank = { diagnostic: 0, low: 1, medium: 2, high: 3, critical: 4 };
+    if ((rank[alarmEvent.priority] ?? 1) < (rank[floor] ?? 1)) return;
+    (this._pendingAlarms ??= []).push(alarmEvent);
+  }
+
+  /** Flush buffered alarm annunciations to the alert bus. */
+  async #publishAlarms({ immediate = false } = {}) {
+    const pending = this._pendingAlarms ?? [];
+    this._pendingAlarms = [];
+    if (!pending.length) return;
+    await this.bus.publish(pending, { immediate });
+  }
+
+  /**
+   * Apply a set of mapped conditions to the register.
+   * `assert` handles present/absent symmetrically, which is what keeps the register
+   * free of alarms that recovered but never cleared.
+   */
+  #applyConditions(conditions, subject, now) {
+    for (const c of conditions) {
+      this.register.assert(c.tag, c.present, c.subject ?? subject, c.evidence ?? {}, now);
+    }
   }
 
   async stop() {
@@ -181,12 +224,48 @@ export class Engine extends EventEmitter {
 
     const mass = detectMassOutage(fleet, this.cfg, prevState.massFlags ?? {});
 
+    /* 3b. Alarms. The detector decides what changed; the register decides what is
+     *     annunciated, acknowledged, shelved or suppressed. */
+    if (this.cfg.alarms?.enabled !== false) {
+      for (const r of results) {
+        const mapped = conditionsFor(r, states[r.cameraId], this.cfg, now);
+        if (mapped.skipped) continue;
+        this.#applyConditions(mapped.conditions, mapped.subject, now);
+        for (const ev of mapped.events) this.register.raiseEvent(ev.tag, mapped.subject, ev.evidence, now);
+      }
+
+      const queue = await queueStats().catch(() => ({ pending: 0 }));
+      const disk = await diskPressure().catch(() => null);
+      const sys = systemConditions({
+        fleet,
+        network,
+        coverage: {
+          stale: false,                       // a completing cycle is by definition not stale
+          overrun: durationMsSoFar() > this.cfg.monitor.intervalSec * 1000,
+          lastDurationMs: durationMsSoFar(),
+        },
+        queue, disk, cfg: this.cfg,
+      });
+      this.#applyConditions(sys.conditions, { id: null, name: this.cfg.site.name }, now);
+      for (const g of sys.groupConditions) {
+        this.register.assert(g.tag, g.present, g.subject, g.evidence, now);
+      }
+
+      // Alarm-system self-monitoring: shelf expiries, chattering, standing alarms.
+      for (const d of this.register.sweep(now)) {
+        this.register.assert(d.tag, true, d.subject, { detail: d.detail }, now);
+      }
+      this.register.prune(now, (this.cfg.alarms?.pruneAfterDays ?? 7) * 86_400_000);
+    }
+    function durationMsSoFar() { return Date.now() - startedAt; }
+
     /* 4. Persist. */
     const durationMs = Date.now() - startedAt;
     await updateState((s) => {
       s.cameras = states;
       s.fleet = fleet;
       s.massFlags = mass.flags;
+      if (this.register) s.alarms = this.register.toJSON();
       s.network = { healthy: network.healthy, since: network.healthy === wasHealthy ? (s.network.since || now) : now, lastCheck: now, detail: network.reason ?? null };
       s.cycle = { count: this.cycleCount, lastStartedAt: startedAt, lastFinishedAt: now, lastDurationMs: durationMs, lastError: null };
     });
@@ -203,6 +282,7 @@ export class Engine extends EventEmitter {
       for (let i = alerts.length - 1; i >= 0; i--) if (alerts[i].type.startsWith('inventory.')) alerts.splice(i, 1);
     }
     if (alerts.length) await this.bus.publish(alerts);
+    await this.#publishAlarms();
 
     if (durationMs > this.cfg.monitor.intervalSec * 1000) {
       logger.warn('cycle took longer than the interval — raise intervalSec or concurrency', {
@@ -255,12 +335,25 @@ export class Engine extends EventEmitter {
       if (state.alerts.watchdogNotifiedAt) {
         await updateState((s) => { s.alerts.watchdogNotifiedAt = 0; });
       }
+      if (this.register?.get('SYS_MONITOR_STALLED')) {
+        this.register.assert('SYS_MONITOR_STALLED', false, { id: null, name: this.cfg.site.name });
+        await this.#publishAlarms({ immediate: true });
+      }
       return;
     }
     const notifiedAt = state.alerts.watchdogNotifiedAt ?? 0;
     if (Date.now() - notifiedAt < wd.repeatEveryMin * 60_000) return;
 
     await updateState((s) => { s.alerts.watchdogNotifiedAt = Date.now(); });
+    // Raise it as a catalogued alarm too: it then has an acknowledgement lifecycle and
+    // appears in the report, rather than being a notification that scrolls away.
+    if (this.register) {
+      this.register.assert('SYS_MONITOR_STALLED', true, { id: null, name: this.cfg.site.name }, {
+        detail: `No monitoring cycle has completed for ${Math.round(staleMs / 60_000)} minutes.`,
+        value: staleMs,
+      });
+      await this.#publishAlarms({ immediate: true });
+    }
     await this.bus.publish([{
       type: 'monitor.stalled', at: Date.now(), staleMs, lastOkAt: lastOk,
       reason: state.cycle.lastError ?? 'cycles are not completing',
@@ -308,6 +401,23 @@ export class Engine extends EventEmitter {
       }
     }
 
+    /* Scheduled all-device report */
+    if (this.cfg.reporting?.enabled) {
+      const lastIssuedAt = state.reporting?.lastIssuedAt ?? 0;
+      const due = nextDue(this.cfg, { lastIssuedAt, now });
+      // On the very first run there is no previous report, so seed the schedule rather
+      // than firing immediately — a service restart should not emit a report.
+      if (!lastIssuedAt) {
+        await updateState((s) => { s.reporting = { ...(s.reporting ?? {}), lastIssuedAt: now }; });
+      } else if (due && now >= (state.reporting?.nextDueAt ?? due.dueAt)) {
+        // Catch-up without spam: one report covering everything since the last one,
+        // however many slots were missed while the service was down.
+        await this.sendReport({ label: 'Scheduled report', trigger: 'schedule' });
+      } else if (!state.reporting?.nextDueAt && due) {
+        await updateState((s) => { s.reporting = { ...(s.reporting ?? {}), nextDueAt: due.dueAt }; });
+      }
+    }
+
     /* Retention + disk pressure */
     if (this.cycleCount % 60 === 0 || !this._prunedOnce) {
       this._prunedOnce = true;
@@ -338,6 +448,67 @@ export class Engine extends EventEmitter {
     }
     await this.bus.publish([{ type: 'digest.scheduled', at: Date.now(), label, text, preRendered: text }], { immediate: true });
     return { sent: true, text };
+  }
+
+  /**
+   * Produce the periodic all-device report and send it to the configured channels.
+   *
+   * The text rendering is what chat channels receive; HTML, CSV and JSON are written
+   * to disk as the report of record and surfaced through the API.
+   */
+  async sendReport({ label = 'Scheduled report', trigger = 'schedule', channels, periodMs } = {}) {
+    const now = Date.now();
+    const { model, rendered, files } = await produceReport({
+      cfg: this.cfg, register: this.register, now, label, trigger, periodMs,
+    });
+
+    const due = nextDue(this.cfg, { lastIssuedAt: now, now });
+    await updateState((s) => {
+      s.reporting = { ...(s.reporting ?? {}), nextDueAt: due?.dueAt ?? null };
+    });
+
+    const healthy = model.summary.counts.down === 0
+      && model.summary.counts.degraded === 0
+      && model.alarms.outstanding.length === 0;
+    if (!this.cfg.reporting.sendWhenHealthy && healthy) {
+      logger.info('report generated but not sent — fleet healthy and sendWhenHealthy is off', { reportId: model.meta.reportId });
+      return { model, files, sent: false };
+    }
+
+    const parts = [].concat(rendered.text ?? []);
+    const target = channels ?? this.cfg.reporting.channels ?? [];
+    for (const [i, part] of parts.entries()) {
+      await this.bus.publish([{
+        type: 'report.scheduled',
+        at: now,
+        label: `${model.meta.reportId}${parts.length > 1 ? ` (${i + 1}/${parts.length})` : ''}`,
+        text: part,
+        reportId: model.meta.reportId,
+        onlyChannels: target.length ? target : null,
+      }], { immediate: true });
+    }
+
+    this.broadcast('report', { reportId: model.meta.reportId, at: now, summary: model.summary, files: Object.keys(files) });
+    return { model, files, sent: true, parts: parts.length };
+  }
+
+  /** Persist the alarm register after an operator action. */
+  async persistAlarms() {
+    if (!this.register) return;
+    await updateState((s) => { s.alarms = this.register.toJSON(); });
+    this.broadcast('alarms', { counts: {
+      annunciated: this.register.annunciated().length,
+      unacknowledged: this.register.unacknowledged().length,
+    } });
+  }
+
+  /** Alarm KPIs over a window, for the API and the dashboard. */
+  async alarmKpis(hours = 24) {
+    return alarmKpis({
+      sinceTs: Date.now() - hours * 3_600_000,
+      register: this.register,
+      operatorPositions: this.cfg.alarms?.operatorPositions ?? 1,
+    });
   }
 
   /** On-demand report in any of the three shapes. Used by the dashboard and CLI. */

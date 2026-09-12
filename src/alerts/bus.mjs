@@ -27,7 +27,14 @@ import { log } from '../core/logger.mjs';
 const logger = log('alerts');
 
 /** Types that are merged into one message when they arrive together. */
-const COALESCIBLE = new Set(['camera.down', 'camera.up', 'camera.degraded', 'camera.recovered', 'inventory.added', 'inventory.removed']);
+const COALESCIBLE = new Set([
+  'camera.down', 'camera.up', 'camera.degraded', 'camera.recovered',
+  'inventory.added', 'inventory.removed',
+  // Alarm annunciations coalesce too: a switch failure raises one alarm per camera,
+  // and twelve separate messages about one fault is precisely the flood the alarm
+  // standards exist to prevent.
+  'alarm.raised', 'alarm.cleared',
+]);
 
 /** Is this alert inside a configured maintenance window? */
 export function inMaintenance(alert, cfg, now = Date.now()) {
@@ -51,7 +58,7 @@ export function routeAccepts(route = {}, alert, severity) {
   if (route.types?.length && !route.types.includes(alert.type)) return false;
   if (route.excludeTypes?.length && route.excludeTypes.includes(alert.type)) return false;
   if (route.groups?.length) {
-    const g = alert.group ?? alert.items?.[0]?.group;
+    const g = alert.group ?? alert.subject?.group ?? alert.items?.[0]?.group ?? alert.items?.[0]?.subject?.group;
     // Site-level alerts have no group and are never filtered out by a group route.
     if (g && !route.groups.includes(g)) return false;
   }
@@ -65,18 +72,25 @@ export function coalesce(alerts) {
   const out = [];
   for (const a of alerts) {
     if (!COALESCIBLE.has(a.type)) { out.push(a); continue; }
-    const list = groups.get(a.type) ?? [];
+    // Key by type AND priority so a critical is never buried inside a batch of
+    // low-priority alarms and rendered under their headline.
+    const key = a.priority ? `${a.type}|${a.priority}` : a.type;
+    const list = groups.get(key) ?? [];
     list.push(a);
-    groups.set(a.type, list);
+    groups.set(key, list);
   }
-  for (const [type, list] of groups) {
+  for (const [key, list] of groups) {
     if (list.length === 1) { out.push(list[0]); continue; }
+    const [type] = key.split('|');
+    const groupsSeen = new Set(list.map((x) => x.group ?? x.subject?.group));
     out.push({
       type,
       at: Math.max(...list.map((x) => x.at ?? Date.now())),
+      priority: list[0].priority,
+      severity: list[0].severity,
       items: list,
       count: list.length,
-      group: new Set(list.map((x) => x.group)).size === 1 ? list[0].group : null,
+      group: groupsSeen.size === 1 ? [...groupsSeen][0] : null,
     });
   }
   // Most severe first so a critical is never buried behind housekeeping.
@@ -103,6 +117,9 @@ export class AlertBus {
     for (const a of alerts) {
       // The log records everything, including alerts that are later suppressed — but
       // not a digest's full rendered body, which would bloat it for no benefit.
+      // The register already logged every alarm transition with full context; logging
+      // the annunciation again (definition and all) would double the event volume.
+      if (String(a.type).startsWith('alarm.')) continue;
       const { text, preRendered, ...rest } = a;
       await appendEvent({ ...rest, severity: severityOf(a) });
     }
@@ -158,6 +175,8 @@ export class AlertBus {
       for (const [name, channelCfg] of Object.entries(cfg.channels)) {
         if (!channelCfg?.enabled) continue;
         if (!this.channels[name]) continue;
+        // A report can name the channels it goes to; everything else uses routes.
+        if (alert.onlyChannels?.length && !alert.onlyChannels.includes(name)) continue;
         if (!routeAccepts(channelCfg.routes, alert, severity)) continue;
         if (!this.#allowRate(name, severity, now)) {
           suppressed++;

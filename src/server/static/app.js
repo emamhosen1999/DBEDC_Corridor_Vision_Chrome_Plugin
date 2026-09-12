@@ -284,6 +284,144 @@ async function testChannel(name, button) {
   }
 }
 
+/* ---------------------------------------------------------------- alarms --- */
+
+const PRIORITY_LABEL = { critical: 'CRITICAL', high: 'HIGH', medium: 'MEDIUM', low: 'LOW', diagnostic: 'DIAG' };
+const ALARM_STATE_LABEL = {
+  'unack-alarm': 'unacknowledged',
+  'ack-alarm': 'acknowledged, still active',
+  'rtn-unack': 'cleared — awaiting acknowledgement',
+  shelved: 'shelved',
+  'suppressed-by-design': 'suppressed (maintenance)',
+  'out-of-service': 'out of service',
+  normal: 'normal',
+};
+
+async function loadAlarms() {
+  const scope = $('alarm-scope').value;
+  const [data, kpi] = await Promise.all([api(`/api/alarms?scope=${scope}`), api('/api/alarms/kpi?hours=24')]);
+
+  $('alarm-counts').textContent =
+    `${data.counts.annunciated} needing attention · ${data.counts.unacknowledged} unacknowledged · ${data.counts.standing} standing`;
+  updateAlarmBadge(data.counts.annunciated);
+
+  $('alarm-list').replaceChildren(...(data.alarms.length
+    ? data.alarms.map(alarmCard)
+    : [el('div', { class: 'card', text: '✅ No alarms. Nothing requires attention.' })]));
+
+  const v = $('kpi-verdict');
+  v.hidden = false;
+  v.className = `banner ${kpi.overall.status === 'acceptable' ? '' : kpi.overall.status === 'overloaded' ? 'critical' : 'warn'}`;
+  v.textContent = kpi.overall.summary;
+
+  const row = (label, measured, target, verdict) => el('tr', {},
+    el('td', { text: label }),
+    el('td', { class: 'num', text: String(measured) }),
+    el('td', { class: 'num', text: String(target) }),
+    el('td', {}, el('span', { class: `pill ${verdict === 'acceptable' ? 'up' : verdict === 'manageable' ? 'degraded' : 'down'}`, text: verdict })));
+
+  $('kpi-rows').replaceChildren(
+    row('Average alarm rate (per hour)', kpi.rate.perHour, `≤ ${kpi.rate.target}`, kpi.rate.verdict),
+    row('Peak alarms in any 10 minutes', kpi.peak.value, `≤ ${kpi.peak.target}`, kpi.peak.verdict),
+    row('Time in alarm flood', `${kpi.flood.pct}%`, `< ${kpi.flood.target}%`, kpi.flood.verdict),
+    row('Standing alarms', kpi.standing.count, `< ${kpi.standing.target}`, kpi.standing.verdict),
+    row('Chattering alarms', kpi.registerState.chattering, '0', kpi.registerState.chattering ? 'above target' : 'acceptable'),
+    row('Shelved / out of service', `${kpi.registerState.shelved} / ${kpi.registerState.outOfService}`, '—', 'acceptable'),
+    row('Mean time to acknowledge', kpi.acknowledgement.meanMs != null ? fmtDuration(kpi.acknowledgement.meanMs) : '—', '—', 'acceptable'),
+  );
+
+  $('contributor-rows').replaceChildren(...kpi.topContributors.items.map((c) => el('tr', {},
+    el('td', { text: c.name }),
+    el('td', { class: 'num', text: String(c.count) }),
+    el('td', { class: 'num', text: `${c.pct}%` }),
+    el('td', { class: 'num', text: String(c.distinctSubjects) }))));
+}
+
+function alarmCard(a) {
+  const actions = [];
+  if (a.state === 'unack-alarm' || a.state === 'rtn-unack') {
+    actions.push(el('button', { class: 'btn primary', text: '✓ Acknowledge', onclick: () => alarmAction('/api/alarms/ack', { key: a.key }) }));
+  }
+  if (a.state === 'shelved') {
+    actions.push(el('button', { class: 'btn', text: 'Return to service', onclick: () => alarmAction('/api/alarms/unshelve', { key: a.key }) }));
+  } else if (a.shelvable && a.state !== 'out-of-service') {
+    actions.push(el('button', {
+      class: 'btn ghost', text: '🔇 Shelve',
+      onclick: () => {
+        // A reason is mandatory — an alarm silenced without one is how alarm systems rot.
+        const reason = window.prompt('Why is this alarm being shelved? (required — the shelf expires automatically)');
+        if (!reason) return;
+        const hours = Number(window.prompt('Shelve for how many hours?', '4')) || 4;
+        alarmAction('/api/alarms/shelve', { key: a.key, reason, hours });
+      },
+    }));
+  }
+  if (a.state === 'out-of-service') {
+    actions.push(el('button', { class: 'btn', text: 'Return to service', onclick: () => alarmAction('/api/alarms/out-of-service', { key: a.key, restore: true }) }));
+  }
+
+  const held = a.shelveReason ?? a.outOfServiceReason;
+  return el('div', { class: `card alarm p-${a.priority}` },
+    el('div', { class: 'a-head' },
+      el('span', { text: a.name }),
+      el('span', { class: `pill ${a.priority === 'critical' || a.priority === 'high' ? 'down' : a.priority === 'medium' ? 'degraded' : 'unknown'}`, text: PRIORITY_LABEL[a.priority] ?? a.priority })),
+    el('div', { class: 'a-meta', text: [a.subject, a.group].filter(Boolean).join(' · ') || 'System' }),
+    el('div', { class: 'a-meta', text: `${ALARM_STATE_LABEL[a.state] ?? a.state}${a.raisedAt ? ` · since ${fmtTime(a.raisedAt)}` : ''}${a.occurrences > 1 ? ` · ${a.occurrences} occurrences` : ''}` }),
+    a.detail ? el('div', { class: 'a-meta', text: a.detail }) : null,
+    a.chattering ? el('div', { class: 'a-meta', style: 'color:var(--degraded)', text: '🔁 chattering — unstable condition' }) : null,
+    held ? el('div', { class: 'a-meta', text: `🔇 ${held}${a.shelvedUntil ? ` (until ${fmtTime(a.shelvedUntil)})` : ''}` }) : null,
+    a.correctiveAction ? el('div', { class: 'a-action' }, el('b', { text: `Action — respond within ${a.timeToRespond ?? 'n/a'}` }), a.correctiveAction) : null,
+    a.consequence ? el('div', { class: 'a-action' }, el('b', { text: 'If ignored' }), a.consequence) : null,
+    actions.length ? el('div', { class: 'a-btns' }, ...actions) : null,
+  );
+}
+
+async function alarmAction(path, body) {
+  try {
+    await api(path, { method: 'POST', body: JSON.stringify(body) });
+    toast('Done');
+    await loadAlarms();
+  } catch (err) { toast(`❌ ${err.message}`, 6000); }
+}
+
+function updateAlarmBadge(n) {
+  const badge = $('alarm-badge');
+  badge.hidden = !n;
+  badge.textContent = n;
+}
+
+/* --------------------------------------------------------------- reports --- */
+
+async function loadReports() {
+  const data = await api('/api/reports?limit=60');
+  $('report-next').textContent = data.next?.dueAt
+    ? `Next scheduled report: ${fmtTime(data.next.dueAt)}`
+    : 'Scheduled reporting is off.';
+  $('report-rows').replaceChildren(...(data.reports.length
+    ? data.reports.map((r) => el('tr', {},
+        el('td', {}, el('code', { text: r.reportId })),
+        el('td', { text: r.at ? fmtTime(r.at) : r.day }),
+        el('td', { text: r.formats.join(', ') }),
+        el('td', {}, ...['html', 'text', 'csv', 'json']
+          .filter((f) => r.formats.some((x) => x.startsWith(f === 'text' ? 'txt' : f)))
+          .map((f) => el('button', { class: 'btn ghost', text: f, onclick: () => openStoredReport(r.reportId, f) })))))
+    : [el('tr', {}, el('td', { colspan: '4', text: 'No reports issued yet.' }))]));
+}
+
+async function openStoredReport(id, format) {
+  try {
+    const r = await api(`/api/reports/read?id=${encodeURIComponent(id)}&format=${format}`);
+    if (format === 'html') {
+      const w = window.open('', '_blank');
+      if (w) { w.document.write(r.body); w.document.close(); return; }
+    }
+    const out = $('report-preview');
+    out.textContent = r.body;
+    out.hidden = false;
+    out.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  } catch (err) { toast(err.message); }
+}
+
 /* --------------------------------------------------------------- settings --- */
 
 function setFormValues(form, config) {
@@ -349,6 +487,16 @@ function connect() {
   source.addEventListener('open', () => { $('live-dot').className = 'dot on'; $('live-text').textContent = 'live'; });
   source.addEventListener('error', () => { $('live-dot').className = 'dot off'; $('live-text').textContent = 'reconnecting…'; });
   source.addEventListener('status', (e) => applyStatus(JSON.parse(e.data)));
+  source.addEventListener('alarms', (e) => {
+    const d = JSON.parse(e.data);
+    updateAlarmBadge(d.counts?.annunciated ?? 0);
+    if (!$('view-alarms').hidden) loadAlarms().catch(() => {});
+  });
+  source.addEventListener('report', (e) => {
+    const d = JSON.parse(e.data);
+    toast(`📋 Report ${d.reportId} issued`, 5000);
+    if (!$('view-reports').hidden) loadReports().catch(() => {});
+  });
   source.addEventListener('alert', (e) => {
     const a = JSON.parse(e.data);
     toast(a.title, 6000);
@@ -369,6 +517,8 @@ document.querySelectorAll('.tab').forEach((tab) => {
     const view = tab.dataset.view;
     document.querySelectorAll('.view').forEach((v) => { v.hidden = v.id !== `view-${view}`; });
     if (view === 'cameras') renderCameras();
+    if (view === 'alarms') loadAlarms().catch((e) => toast(e.message));
+    if (view === 'reports') loadReports().catch((e) => toast(e.message));
     if (view === 'timeline') loadTimeline().catch((e) => toast(e.message));
     if (view === 'uptime') loadUptime().catch((e) => toast(e.message));
     if (view === 'alerts') loadAlerts().catch((e) => toast(e.message));
@@ -416,6 +566,44 @@ $('btn-send-digest').addEventListener('click', async () => {
   catch (err) { toast(err.message); }
 });
 
+$('alarm-scope').addEventListener('change', () => loadAlarms().catch((e) => toast(e.message)));
+$('btn-ack-all').addEventListener('click', async () => {
+  if (!window.confirm('Acknowledge every alarm currently needing attention?')) return;
+  const note = window.prompt('Optional note for the record:') ?? null;
+  await alarmAction('/api/alarms/ack', { all: true, note });
+});
+
+$('btn-preview-report').addEventListener('click', async (e) => {
+  e.target.disabled = true;
+  try {
+    const format = $('report-preview-format').value;
+    const hours = $('report-preview-hours').value;
+    const r = await api(`/api/reports/preview?format=${format}&hours=${hours}`);
+    if (format === 'html') {
+      const w = window.open('', '_blank');
+      if (w) { w.document.write(r.body); w.document.close(); }
+      else toast('Allow pop-ups to preview the HTML report');
+    } else {
+      const out = $('report-preview');
+      out.textContent = r.body;
+      out.hidden = false;
+    }
+  } catch (err) { toast(err.message, 6000); }
+  finally { e.target.disabled = false; }
+});
+
+$('btn-issue-report').addEventListener('click', async (e) => {
+  if (!window.confirm('Issue a report now and send it to every configured alert channel?')) return;
+  e.target.disabled = true;
+  e.target.textContent = 'Sending…';
+  try {
+    const r = await api('/api/reports/send', { method: 'POST', body: JSON.stringify({ label: 'Manual report' }) });
+    toast(`${r.reportId} issued — ${r.devices} devices, ${r.sent ? `sent in ${r.parts} part(s)` : 'not sent'}`, 6000);
+    await loadReports();
+  } catch (err) { toast(err.message, 6000); }
+  finally { e.target.disabled = false; e.target.textContent = 'Issue & send now'; }
+});
+
 $('btn-csv').addEventListener('click', () => {
   const head = ['Camera', 'Zone', 'IP', 'Status', 'For', 'Latency(ms)', 'Detail'];
   const cell = (v) => { const s = String(v ?? ''); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
@@ -455,7 +643,11 @@ bindForm('form-import', (form) => api('/api/inventory/import', { method: 'POST',
 bindForm('form-discover', (form) => api('/api/inventory/discover', { method: 'POST', body: JSON.stringify({ cidr: form.elements.cidr.value.trim() }) }), 'Subnet scan complete');
 
 /* Keep relative times honest without waiting for the next SSE frame. */
-setInterval(() => { if (!$('view-cameras').hidden) renderCameras(); if (!$('view-overview').hidden) renderOverview(); }, 15_000);
+setInterval(() => {
+  if (!$('view-cameras').hidden) renderCameras();
+  if (!$('view-overview').hidden) renderOverview();
+  if (!$('view-alarms').hidden) loadAlarms().catch(() => {});
+}, 15_000);
 
 (async function init() {
   try {
@@ -465,5 +657,6 @@ setInterval(() => { if (!$('view-cameras').hidden) renderCameras(); if (!$('view
   } catch { /* the SSE stream will fill this in */ }
   try { applyStatus(await api('/api/status')); } catch (err) { toast(err.message); }
   STATE.notify = 'Notification' in window && Notification.permission === 'granted';
+  try { updateAlarmBadge((await api('/api/alarms')).counts.annunciated); } catch { /* shown on the tab instead */ }
   connect();
 })();

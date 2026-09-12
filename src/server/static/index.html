@@ -39,6 +39,8 @@
 <nav class="tabs" role="tablist">
   <button class="tab active" role="tab" aria-selected="true" data-view="overview">Overview</button>
   <button class="tab" role="tab" aria-selected="false" data-view="cameras">Cameras</button>
+  <button class="tab" role="tab" aria-selected="false" data-view="alarms">Alarms <span class="tab-badge" id="alarm-badge" hidden>0</span></button>
+  <button class="tab" role="tab" aria-selected="false" data-view="reports">Reports</button>
   <button class="tab" role="tab" aria-selected="false" data-view="timeline">Timeline</button>
   <button class="tab" role="tab" aria-selected="false" data-view="uptime">Uptime</button>
   <button class="tab" role="tab" aria-selected="false" data-view="alerts">Alerts</button>
@@ -92,6 +94,65 @@
       </table>
     </div>
     <p class="muted" id="camera-count"></p>
+  </section>
+
+  <!-- ============================= ALARMS ============================= -->
+  <section id="view-alarms" class="view" hidden>
+    <div class="toolbar">
+      <select id="alarm-scope">
+        <option value="annunciated">Needs attention</option>
+        <option value="active">All active</option>
+        <option value="all">Everything in the register</option>
+      </select>
+      <button id="btn-ack-all" class="btn">✓ Acknowledge all</button>
+      <span class="muted" id="alarm-counts"></span>
+    </div>
+    <div id="alarm-list" class="cards"></div>
+
+    <h2>Alarm system performance <span class="muted">EEMUA 191</span></h2>
+    <div id="kpi-verdict" class="banner" hidden></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Metric</th><th class="num">Measured</th><th class="num">Target</th><th>Verdict</th></tr></thead>
+        <tbody id="kpi-rows"></tbody>
+      </table>
+    </div>
+    <h2>Top alarm contributors</h2>
+    <p class="muted">A few conditions usually produce most of the noise — fixing those fixes the alarm system.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Alarm</th><th class="num">Count</th><th class="num">Share</th><th class="num">Devices</th></tr></thead>
+        <tbody id="contributor-rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============================= REPORTS ============================ -->
+  <section id="view-reports" class="view" hidden>
+    <div class="toolbar">
+      <select id="report-preview-format">
+        <option value="text">Text (chat)</option>
+        <option value="html">HTML</option>
+        <option value="csv">CSV register</option>
+        <option value="json">JSON</option>
+      </select>
+      <select id="report-preview-hours">
+        <option value="6" selected>Last 6 hours</option>
+        <option value="24">Last 24 hours</option>
+        <option value="168">Last 7 days</option>
+      </select>
+      <button id="btn-preview-report" class="btn">Preview</button>
+      <button id="btn-issue-report" class="btn primary">Issue &amp; send now</button>
+      <span class="muted" id="report-next"></span>
+    </div>
+    <h2>Reports of record</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Report</th><th>Issued</th><th>Formats</th><th></th></tr></thead>
+        <tbody id="report-rows"></tbody>
+      </table>
+    </div>
+    <pre id="report-preview" class="output" hidden></pre>
   </section>
 
   <!-- ============================ TIMELINE ============================ -->

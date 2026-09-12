@@ -1,5 +1,79 @@
 # Changelog
 
+## 2.1.0 — Industry-standard alarm management and periodic reporting
+
+Adds a real alarm system in place of a notification stream, and a scheduled
+all-device report. See [`docs/ALARMS.md`](docs/ALARMS.md).
+
+### Alarm management — ISA-18.2 / IEC 62682
+
+- **37 rationalised alarm types** across ten functional classes. Every one carries its
+  cause, consequence, corrective action and time to respond — and those ship inside the
+  alarm message, so an alarm that reaches a phone at 3am tells the reader what to do.
+- **Full alarm lifecycle**: `NORMAL → UNACK_ALARM → ACK_ALARM → NORMAL`, plus
+  `RTN_UNACK` for an alarm that cleared before anyone saw it. A camera that dropped at
+  03:00 and recovered at 03:04 stays on the annunciator until acknowledged, instead of
+  vanishing before the morning shift arrives.
+- **Shelving** with a mandatory reason and a hard expiry cap; an expiring shelf raises
+  its own diagnostic alarm so un-shelving is never silent.
+- **Suppression by design** via maintenance windows, scoped by zone, camera or tag.
+- **Out of service** for cameras removed for works.
+- Only four conditions are critical: site outage, zone dark, monitoring stalled, and
+  alarms failing to be delivered. The last two cannot be shelved or suppressed.
+- New `SYS_CHANNEL_FAIL` alarm: raised when the delivery queue backs up, because
+  detecting faults correctly while failing to tell anyone is the most dangerous silent
+  failure an alarm system has.
+
+### Alarm system performance — EEMUA 191
+
+- Average alarm rate, peak per 10 minutes, time in flood, standing alarms, top-10
+  contributors, priority mix and mean time to acknowledge, each scored against its
+  published target with a verdict.
+- Chattering, standing and flood detection raise their own alarms, so the alarm system
+  reports on its own health.
+- The 80/15/5 priority target is measured against annunciated **traffic**, not against
+  catalogue composition — scoring a catalogue against it is a category error, and the
+  catalogue's composition is reported as design information with no pass/fail.
+
+### Periodic all-device report
+
+- **Complete device register** on a schedule, not a fault list. Includes healthy,
+  never-probed, excluded and orphaned devices, because *"what is broken"* and *"what was
+  checked"* are different questions and only the second evidences coverage.
+- Nine sections: executive summary in prose, fleet status, alarm summary, zone
+  breakdown, action required, the full register, availability, EEMUA performance, and
+  monitoring system health.
+- Four renderings from one model — text (chunked on section boundaries for chat), HTML
+  (print-ready, self-contained), CSV (one row per device), JSON — all filed as the
+  report of record with 365-day retention.
+- **Sequential report numbering** persisted across restarts, so a gap is evidence that a
+  report was missed. Previews are labelled `PREVIEW` and never consume a number.
+- **Catch-up without spam**: a service that was down across two slots issues one report
+  covering the whole elapsed period and states that coverage was interrupted.
+- A report generated while monitoring is stale says so as its first line.
+
+### WhatsApp Cloud API
+
+- Group messaging via `recipient_type: "group"`, and a `wa-groups` command to read group
+  ids.
+- **Automatic template fallback** for Meta's 24-hour customer service window. Free-form
+  text is refused outside it, which is precisely when overnight alarms are raised;
+  the channel now re-sends the same alert as an approved template. `doctor` warns when
+  no template is configured.
+- Health check reporting the number's verified name and quality rating.
+
+### Other
+
+- Probe layers now emit **structured findings** with stable codes, so alarm mapping no
+  longer depends on pattern-matching human-readable warning text.
+- Camera restarts are detected from uptime running backwards.
+- Alarm annunciations coalesce by type **and priority**, so a critical is never buried
+  inside a batch of low-priority alarms.
+- Dashboard gains **Alarms** and **Reports** tabs.
+- Fixed: a configuration change applied through the API updated the alert bus but not
+  the alarm register, leaving it enforcing stale maintenance windows and shelve caps.
+- 163 tests (was 103).
+
 ## 2.0.0 — Corridor Vision
 
 Complete replacement of the `aiv-camera-status-extension` Chrome extension with a

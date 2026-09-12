@@ -17,6 +17,11 @@ import { validateChannels } from '../alerts/channels/index.mjs';
 import { probeCamera } from '../probe/index.mjs';
 import { discoverSubnet } from '../monitor/discovery.mjs';
 import { renderAlert } from '../core/format.mjs';
+import { CATALOG, TAGS, byClass, priorityDistribution } from '../alarms/catalog.mjs';
+import { effectivePriority, STATE as ALARM_STATE } from '../alarms/register.mjs';
+import { listReports, readReport, nextDue } from '../report/scheduler.mjs';
+import { buildReportModel } from '../report/model.mjs';
+import { render as renderReport } from '../report/render.mjs';
 import { log } from '../core/logger.mjs';
 
 const logger = log('api');
@@ -163,7 +168,10 @@ export function buildApi({ cfg, engine, server }) {
       // Push the new config into the live objects so changes take effect immediately.
       Object.assign(cfg, next);
       engine.cfg = cfg;
+      // Every long-lived subsystem holds its own reference: the register would
+      // otherwise keep enforcing the previous maintenance windows and shelve caps.
       engine.bus?.setConfig(cfg);
+      engine.register?.setConfig(cfg);
       logger.info('configuration updated via dashboard');
       return ok({ saved: true, warnings, config: redact(next) });
     },
@@ -177,12 +185,164 @@ export function buildApi({ cfg, engine, server }) {
       return ok({ saved: true, path: body.path, secrets: listSecrets() });
     },
 
+    /* ------------------------------- alarms ------------------------------- */
+
+    /** The live annunciator: what needs attention, most severe and oldest first. */
+    'GET /api/alarms': async (url) => {
+      const reg = engine.register;
+      if (!reg) return ok({ alarms: [], enabled: false });
+      const scope = url.searchParams.get('scope') ?? 'annunciated';
+      const source = scope === 'all' ? [...reg.instances.values()]
+        : scope === 'active' ? reg.active()
+        : reg.annunciated();
+      return ok({
+        enabled: true,
+        scope,
+        alarms: source.map((i) => ({
+          key: i.key, tag: i.tag, name: CATALOG[i.tag]?.name ?? i.tag,
+          class: CATALOG[i.tag]?.class ?? 'unknown',
+          priority: effectivePriority(i), state: i.state,
+          subject: i.subjectName, subjectId: i.subjectId, group: i.subjectGroup,
+          raisedAt: i.raisedAt, firstRaisedAt: i.firstRaisedAt,
+          ackedAt: i.ackedAt, ackedBy: i.ackedBy,
+          occurrences: i.occurrences, detail: i.detail, chattering: i.chattering,
+          shelvedUntil: i.shelvedUntil, shelveReason: i.shelveReason,
+          outOfServiceReason: i.outOfServiceReason,
+          correctiveAction: CATALOG[i.tag]?.correctiveAction ?? null,
+          consequence: CATALOG[i.tag]?.consequence ?? null,
+          timeToRespond: CATALOG[i.tag]?.timeToRespond ?? null,
+          shelvable: CATALOG[i.tag]?.shelvable !== false,
+        })),
+        counts: {
+          annunciated: reg.annunciated().length,
+          unacknowledged: reg.unacknowledged().length,
+          standing: reg.standing().length,
+        },
+      });
+    },
+
+    'POST /api/alarms/ack': async (_url, body) => {
+      const reg = engine.register;
+      if (!reg) return bad('the alarm register is not running');
+      const by = body?.by || 'dashboard';
+      if (body?.all) {
+        const n = reg.acknowledgeAll({ by, note: body.note });
+        await engine.persistAlarms();
+        logger.info('bulk acknowledge', { count: n, by });
+        return ok({ acknowledged: n });
+      }
+      if (!body?.key) return bad('provide { "key": "TAG:subjectId" } or { "all": true }');
+      const inst = reg.acknowledge(body.key, { by, note: body.note });
+      if (!inst) return bad(`nothing to acknowledge for "${body.key}"`);
+      await engine.persistAlarms();
+      return ok({ acknowledged: 1, alarm: { key: inst.key, state: inst.state, ackedBy: inst.ackedBy } });
+    },
+
+    'POST /api/alarms/shelve': async (_url, body) => {
+      const reg = engine.register;
+      if (!reg) return bad('the alarm register is not running');
+      if (!body?.key) return bad('key is required');
+      const r = reg.shelve(body.key, {
+        hours: body.hours ?? cfg.alarms?.defaultShelveHours ?? 4,
+        by: body.by || 'dashboard',
+        reason: body.reason,
+      });
+      if (!r.ok) return bad(r.error);
+      await engine.persistAlarms();
+      return ok({ shelved: true, hours: r.hours, until: r.instance.shelvedUntil });
+    },
+
+    'POST /api/alarms/unshelve': async (_url, body) => {
+      const reg = engine.register;
+      if (!reg || !body?.key) return bad('key is required');
+      const r = reg.unshelve(body.key, { by: body.by || 'dashboard' });
+      if (!r.ok) return bad(r.error);
+      await engine.persistAlarms();
+      return ok({ unshelved: true });
+    },
+
+    'POST /api/alarms/out-of-service': async (_url, body) => {
+      const reg = engine.register;
+      if (!reg || !body?.key) return bad('key is required');
+      const r = body.restore
+        ? reg.returnToService(body.key, { by: body.by || 'dashboard' })
+        : reg.outOfService(body.key, { by: body.by || 'dashboard', reason: body.reason });
+      if (!r.ok) return bad(r.error);
+      await engine.persistAlarms();
+      return ok({ ok: true, state: r.instance.state });
+    },
+
+    'GET /api/alarms/kpi': async (url) => {
+      const hours = Math.min(24 * 90, Number(url.searchParams.get('hours')) || 24);
+      return ok(await engine.alarmKpis(hours));
+    },
+
+    /** The rationalised catalogue — what this system can annunciate, and why. */
+    'GET /api/alarms/catalog': async () => ok({
+      tags: TAGS,
+      catalog: CATALOG,
+      byClass: Object.fromEntries([...byClass()].map(([k, v]) => [k, v.map((d) => d.tag)])),
+      distribution: priorityDistribution(),
+      states: Object.values(ALARM_STATE),
+    }),
+
+    /* ------------------------------- reports ------------------------------ */
+
+    'GET /api/reports': async (url) => ok({
+      reports: await listReports({ limit: Math.min(200, Number(url.searchParams.get('limit')) || 50) }),
+      next: nextDue(cfg, { lastIssuedAt: (await loadState()).reporting?.lastIssuedAt ?? 0 }),
+      config: cfg.reporting,
+    }),
+
+    /** Render a report on demand without issuing or sending it. */
+    'GET /api/reports/preview': async (url) => {
+      const format = url.searchParams.get('format') ?? 'html';
+      const hours = Math.min(24 * 31, Number(url.searchParams.get('hours')) || 6);
+      const model = await buildReportModel({
+        cfg, register: engine.register, periodMs: hours * 3_600_000,
+        label: 'Preview', trigger: 'preview', sequence: { number: 0 },
+      });
+      const body = renderReport(model, format, format === 'text'
+        ? { fullRegister: cfg.reporting?.fullRegister !== false, maxChars: 1e9 }
+        : undefined);
+      return ok({ format, body: Array.isArray(body) ? body.join('\n\n') : body, reportId: model.meta.reportId });
+    },
+
+    /** Read a stored report of record. */
+    'GET /api/reports/read': async (url) => {
+      const id = url.searchParams.get('id');
+      const format = url.searchParams.get('format') ?? 'html';
+      if (!id) return bad('id is required');
+      const body = await readReport(id, format);
+      if (body === null) return bad(`no stored report "${id}" in format "${format}"`, 404);
+      return ok({ reportId: id, format, body });
+    },
+
+    /** Issue a report now and send it to the channels. */
+    'POST /api/reports/send': async (_url, body) => {
+      const out = await engine.sendReport({
+        label: body?.label ?? 'Manual report',
+        trigger: 'manual',
+        channels: body?.channels,
+        periodMs: body?.hours ? body.hours * 3_600_000 : undefined,
+      });
+      return ok({
+        reportId: out.model.meta.reportId,
+        sent: out.sent,
+        parts: out.parts ?? 0,
+        files: Object.keys(out.files),
+        devices: out.model.devices.length,
+      });
+    },
+
     'GET /api/site': async () => ok({
       site: cfg.site,
       version: 2,
       intervalSec: cfg.monitor.intervalSec,
       alertsEnabled: cfg.alerts.enabled,
       quietHours: cfg.alerts.quietHours,
+      reporting: { enabled: cfg.reporting?.enabled, mode: cfg.reporting?.mode, times: cfg.reporting?.times, intervalMinutes: cfg.reporting?.intervalMinutes },
+      alarms: { enabled: cfg.alarms?.enabled },
     }),
   };
 

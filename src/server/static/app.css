@@ -115,6 +115,20 @@ main { padding: 4px 20px; }
 .card .c-meta { font-size: 12px; color: var(--muted); margin-top: 3px; }
 .card .c-detail { font-size: 12px; margin-top: 6px; color: var(--ink); opacity: .85; }
 .card .c-warn { font-size: 12px; margin-top: 5px; color: var(--degraded); }
+.tab-badge { background: var(--down); color:#fff; border-radius:20px; padding:0 6px; font-size:11px; margin-left:4px; }
+.alarm { border-left-width:3px; border-left-style:solid; }
+.alarm.p-critical { border-left-color: var(--down); }
+.alarm.p-high { border-left-color: #e0574c; }
+.alarm.p-medium { border-left-color: var(--degraded); }
+.alarm.p-low { border-left-color: #c9b02e; }
+.alarm.p-diagnostic { border-left-color: var(--unknown); }
+.alarm .a-head { display:flex; justify-content:space-between; gap:8px; align-items:baseline; font-weight:600; }
+.alarm .a-meta { font-size:12px; color:var(--muted); margin-top:3px; }
+.alarm .a-action { font-size:12px; margin-top:7px; padding:7px 9px; background:var(--panel-2); border-radius:6px; }
+.alarm .a-action b { display:block; font-size:10.5px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin-bottom:2px; }
+.alarm .a-btns { display:flex; gap:6px; margin-top:9px; flex-wrap:wrap; }
+.alarm .a-btns .btn { padding:4px 10px; font-size:12px; }
+
 .count { background: var(--panel-2); border-radius: 20px; padding: 1px 9px; font-size: 12px; color: var(--muted); font-weight: 600; }
 
 /* ---------- toolbar, forms, tables ---------- */

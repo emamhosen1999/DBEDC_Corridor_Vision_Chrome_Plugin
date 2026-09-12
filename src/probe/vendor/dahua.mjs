@@ -40,7 +40,8 @@ export const dahua = {
     ]);
     if (!info.ok) return { ok: false, vendor: 'dahua', reason: info.reason, status: info.status };
 
-    const out = { ok: true, vendor: 'dahua', warnings: [], model: info.kv.deviceType ?? null, serial: info.kv.serialNumber ?? null };
+    const out = { ok: true, vendor: 'dahua', warnings: [], findings: [], model: info.kv.deviceType ?? null, serial: info.kv.serialNumber ?? null };
+    const finding = (code, detail, value) => { out.findings.push({ code, detail, value }); out.warnings.push(detail); };
     if (version.ok) out.firmware = version.kv['version'] ?? Object.values(version.kv)[0] ?? null;
     if (storage.ok) {
       const total = Number(storage.kv['list[0].Detail[0].TotalBytes']);
@@ -48,9 +49,9 @@ export const dahua = {
       const state = storage.kv['list[0].State'] ?? null;
       if (Number.isFinite(total)) {
         out.storage = [{ name: 'sd1', status: state, totalMB: Math.round(total / 1e6), freeMB: Math.round((total - used) / 1e6) }];
-        if (total > 0 && (total - used) / total < 0.02) out.warnings.push('storage nearly full');
+        if (total > 0 && (total - used) / total < 0.02) finding('STORAGE_FULL', 'storage is nearly full', Math.round(((total - used) / total) * 100));
       }
-      if (state && !/^(Running|Normal)$/i.test(state)) out.warnings.push(`storage ${state}`);
+      if (state && !/^(Running|Normal)$/i.test(state)) finding('STORAGE_FAIL', `storage reports "${state}"`, state);
     }
     return out;
   },

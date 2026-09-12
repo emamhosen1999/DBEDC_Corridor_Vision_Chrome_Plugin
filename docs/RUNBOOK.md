@@ -13,16 +13,57 @@ not running. Nothing it showed you since is current. Go to
 
 ---
 
+## Alarms — acknowledging and shelving
+
+The **Alarms** tab is the annunciator. Every alarm shows what to do and what happens if
+you ignore it.
+
+- **Acknowledge** means *I have seen this*. It does not fix anything, and it does not
+  clear the alarm — the alarm clears when the condition does.
+- An alarm marked **cleared — awaiting acknowledgement** recovered on its own. It stays
+  on screen so the incoming shift knows it happened. Acknowledge it once you have
+  noted it.
+- **Shelve** silences an alarm temporarily. It **requires a reason** and **always
+  expires** (default 4 hours, hard cap 24). Use it when a contractor is on site and
+  will be unplugging cameras — not to make a nuisance alarm go away.
+- Two alarms cannot be shelved at all: **MONITORING HAS STOPPED** and **alert channel
+  failing**. Those two tell you the alarm system itself has failed, and silencing them
+  would defeat the entire point.
+
+If an alarm keeps coming back, do not keep shelving it. Say so at handover — repeated
+shelving of the same alarm is the signal that something needs fixing properly.
+
+---
+
+## The periodic report
+
+A complete report of **every camera** is issued on a schedule (by default 06:00, 14:00
+and 22:00 site time) and sent to the alert channels.
+
+- It lists every device, not just the broken ones. That is deliberate: it is the
+  evidence of what was actually checked.
+- Each report is numbered, e.g. `CV-DBE-20260912-002`. **A gap in the numbering means a
+  report was missed** — worth raising.
+- If the report's first line says **MONITORING STALE**, the report is describing history,
+  not the present. Do not act on its camera states until monitoring is restored.
+- Section 5, *Action required*, is the part to work through on shift.
+
+To send one now: dashboard → **Reports** → **Issue & send now**.
+To pull one for a meeting: **Reports** → pick the report → **html** or **csv**.
+
+---
+
 ## Daily checks (2 minutes)
 
 1. Open `http://127.0.0.1:8477` on the monitoring PC.
 2. The header should read **live** with a green dot, and "last probe" within the last
    couple of minutes.
 3. **No red banner** across the top.
-4. **Overview** → fleet health percentage, and the "not serving video" list.
-5. **Alerts** tab → delivery queue should be empty or near it.
+4. **Alarms** tab → work anything needing attention; acknowledge what you have seen.
+5. **Overview** → fleet health percentage, and the "not serving video" list.
+6. **Alerts** tab → delivery queue should be empty or near it.
 
-If all four are right, nothing needs doing.
+If all six are right, nothing needs doing.
 
 ---
 
@@ -202,6 +243,10 @@ Stop-ScheduledTask  -TaskName CorridorVision
 
 1. Current fleet health % and the count not serving video.
 2. Any camera down more than an hour, and whether a job is raised.
-3. Any zone-level or site-level alert in the last 12 hours.
+3. Any zone-level or site-level alarm in the last 12 hours.
 4. Any period where monitoring itself was stopped — and that it is an unobserved gap.
 5. Any active maintenance window and when it ends.
+6. **Any alarms you shelved**, why, and when the shelf expires — the next shift inherits
+   the silence, and an expiring shelf will re-annunciate on their watch.
+7. **Any alarms still unacknowledged**, and why they were left.
+8. The number of the last report issued, so a gap in the sequence is noticed.

@@ -3,10 +3,10 @@
  *
  * The honest state of WhatsApp group messaging, which decides the design:
  *
- *  - Meta's official Cloud API added a Groups API, but groups are capped at EIGHT
- *    participants and require an Official Business Account. An ops group larger than
- *    eight — i.e. essentially every real one — cannot be reached this way. Supported
- *    here for completeness and for 1:1 numbers, but it is not the recommended route.
+ *  - Meta's official Cloud API supports groups, capped at EIGHT participants and
+ *    requiring an Official Business Account. With an OBA and a group that fits inside
+ *    eight, this is the RECOMMENDED route: official, supported, nothing to keep
+ *    linked. Its one trap is the 24-hour messaging window — see the section below.
  *  - GREEN API and WAHA both link a normal WhatsApp number by QR and address a real
  *    group by its chatId (`<id>@g.us`) with no participant cap. These are the two
  *    routes that actually work for an ops group.
@@ -126,56 +126,166 @@ export const whatsappWaha = {
 
 /* ------------------------------------------------------- Meta Cloud API --- */
 /**
- * Official WhatsApp Business Cloud API.
+ * Official WhatsApp Business Cloud API — the recommended route when you hold an
+ * Official Business Account.
  *
- * Note the group limitation stated at the top of this file: groups are capped at
- * eight participants and need an Official Business Account. For 1:1 delivery to
- * on-call numbers it is the most reliable route available.
+ * Groups: `recipient_type: "group"` with a group id addresses a real group. Meta caps
+ * these at EIGHT participants, which is fine for a duty roster and not fine for a
+ * whole department — size the group accordingly before relying on it.
  *
- * Also note the 24-hour customer service window: free-form text can only be sent to
- * a number that messaged you in the last 24 hours. Outside it, only approved
- * templates are delivered. That is a property of the platform, not of this code, and
- * the error is surfaced verbatim rather than hidden.
+ * THE 24-HOUR WINDOW IS THE THING THAT WILL BITE YOU.
+ * Meta only delivers free-form text inside a 24-hour "customer service window" opened
+ * by someone messaging the business number. A monitoring system raises its most
+ * important alarms at 03:00, long after the window has lapsed — and Meta rejects those
+ * with error 131047/131026 rather than delivering them. A monitor whose alerts are
+ * silently refused overnight is worse than no monitor.
+ *
+ * The fix, and the reason `template` config exists: approved MESSAGE TEMPLATES are
+ * delivered at any time, window or not. This channel sends free-form text, and on a
+ * window error automatically re-sends the same alert as a template. Configure a
+ * template and the 3am alarm arrives; skip it and it will not.
+ *
+ * Create one in WhatsApp Manager → Message templates, category UTILITY, with a body of
+ * exactly one variable, e.g.:
+ *     "Corridor Vision alert:\n\n{{1}}"
+ * then set channels.whatsappCloud.template.name to its name.
  */
+
+/** Meta error codes that mean "outside the 24-hour window — use a template". */
+const WINDOW_ERROR_CODES = new Set([131047, 131026, 131051, 470]);
+
+function windowErrorFrom(err) {
+  const text = String(err?.message ?? '');
+  const code = Number(/"code"\s*:\s*(\d+)/.exec(text)?.[1]);
+  if (WINDOW_ERROR_CODES.has(code)) return code;
+  // Meta's prose varies by API version; match the phrasing too.
+  if (/re-?engagement|outside the (24|twenty-four)|message window|24 hour/i.test(text)) return 0;
+  return null;
+}
+
+async function cloudSend(cfg, payload) {
+  const version = cfg.apiVersion || 'v21.0';
+  return postJson(
+    `https://graph.facebook.com/${version}/${cfg.phoneNumberId}/messages`,
+    payload,
+    { headers: { Authorization: `Bearer ${cfg.accessToken}` } },
+  );
+}
+
 export const whatsappCloud = {
   name: 'whatsappCloud',
-  describe: () => 'WhatsApp via Meta Cloud API (official; groups capped at 8 and need an OBA)',
+  describe: () => 'WhatsApp via Meta Cloud API (official; groups supported, capped at 8 participants)',
 
   validate(raw) {
     const c = resolveRefs(raw);
     const problems = [];
     if (!c.phoneNumberId) problems.push('phoneNumberId is required (Meta App → WhatsApp → API Setup)');
-    if (!c.accessToken) problems.push('accessToken is required');
-    if (!c.to) problems.push('to is required (a phone number in international format, digits only)');
+    if (!c.accessToken) problems.push('accessToken is required — store it with: node src/cli.mjs secret set whatsappCloud.accessToken <token>');
+    if (!c.to) {
+      problems.push(c.recipientType === 'group'
+        ? 'to is required — the group id. List your groups with: node src/cli.mjs wa-groups'
+        : 'to is required — a phone number in international format, digits only, no +');
+    } else if (c.recipientType !== 'group' && !/^\d{8,15}$/.test(String(c.to))) {
+      problems.push(`to "${c.to}" should be digits only in international format, e.g. 8801712345678`);
+    }
     if (c.recipientType === 'group') {
-      problems.push('NOTE: Cloud API groups are limited to 8 participants and require an Official Business Account — use GREEN API or WAHA for a real ops group');
+      problems.push('NOTE: Cloud API groups are capped at 8 participants — keep the group to a duty roster, not a whole department');
+    }
+    if (!c.template?.name) {
+      problems.push(
+        'NOTE: no template configured. Meta refuses free-form text outside the 24-hour customer '
+        + 'service window, so alarms raised overnight will NOT be delivered. Configure '
+        + 'template.name with an approved UTILITY template whose body is a single {{1}} variable.',
+      );
     }
     return problems;
   },
 
-  async send(msg, raw) {
+  /** Confirm the token and number are live. Surfaced by `doctor`. */
+  async health(raw) {
     const c = resolveRefs(raw);
     const version = c.apiVersion || 'v21.0';
-    const phoneNumberId = required(c.phoneNumberId, 'phoneNumberId', 'whatsappCloud');
-    const token = required(c.accessToken, 'accessToken', 'whatsappCloud');
+    const res = await request(
+      `https://graph.facebook.com/${version}/${c.phoneNumberId}?fields=verified_name,quality_rating,display_phone_number`,
+      { headers: { Authorization: `Bearer ${c.accessToken}` }, timeoutMs: 10_000 },
+    );
+    const b = res.body ?? {};
+    return {
+      ok: !!b.display_phone_number,
+      status: b.quality_rating ?? 'unknown',
+      detail: b.display_phone_number
+        ? `${b.verified_name ?? 'number'} ${b.display_phone_number} · quality ${b.quality_rating ?? 'n/a'}`
+        : 'the API did not return this number — check phoneNumberId and the access token',
+    };
+  },
+
+  /** List the groups this business number can post to. Used by `wa-groups`. */
+  async listGroups(raw) {
+    const c = resolveRefs(raw);
+    const version = c.apiVersion || 'v21.0';
+    const res = await request(
+      `https://graph.facebook.com/${version}/${c.phoneNumberId}/groups`,
+      { headers: { Authorization: `Bearer ${c.accessToken}` }, timeoutMs: 15_000 },
+    );
+    return res.body?.data ?? [];
+  },
+
+  async send(msg, raw) {
+    const c = resolveRefs(raw);
+    const cfg = {
+      apiVersion: c.apiVersion || 'v21.0',
+      phoneNumberId: required(c.phoneNumberId, 'phoneNumberId', 'whatsappCloud'),
+      accessToken: required(c.accessToken, 'accessToken', 'whatsappCloud'),
+    };
     const to = required(c.to, 'to', 'whatsappCloud');
+    const recipientType = c.recipientType === 'group' ? 'group' : 'individual';
 
     const ids = [];
+    let usedTemplate = false;
+
     for (const part of chunk(msg.text, WA_LIMIT)) {
-      const res = await postJson(
-        `https://graph.facebook.com/${version}/${phoneNumberId}/messages`,
-        {
+      try {
+        const res = await cloudSend(cfg, {
           messaging_product: 'whatsapp',
-          recipient_type: c.recipientType === 'group' ? 'group' : 'individual',
+          recipient_type: recipientType,
           to,
           type: 'text',
           text: { preview_url: false, body: part },
-        },
-        { headers: { Authorization: `Bearer ${token}` } },
-      );
-      ids.push(res.body?.messages?.[0]?.id ?? 'sent');
+        });
+        ids.push(res.body?.messages?.[0]?.id ?? 'sent');
+      } catch (err) {
+        const windowCode = windowErrorFrom(err);
+        if (windowCode === null || !c.template?.name) {
+          // Not a window problem, or no template to fall back to — surface it as-is,
+          // including the actionable hint, rather than pretending the alert was sent.
+          if (windowCode !== null) {
+            throw new ChannelError(
+              `${err.message}\n\nThis is Meta's 24-hour customer service window: free-form text is only `
+              + 'delivered within 24 hours of someone messaging the business number. Configure '
+              + 'channels.whatsappCloud.template.name with an approved UTILITY template so alarms '
+              + 'raised overnight still arrive.',
+              { permanent: false },
+            );
+          }
+          throw err;
+        }
+        // Outside the window: re-send this part as an approved template.
+        const res = await cloudSend(cfg, {
+          messaging_product: 'whatsapp',
+          recipient_type: recipientType,
+          to,
+          type: 'template',
+          template: {
+            name: c.template.name,
+            language: { code: c.template.languageCode || 'en' },
+            components: [{ type: 'body', parameters: [{ type: 'text', text: part.slice(0, 1024) }] }],
+          },
+        });
+        ids.push(res.body?.messages?.[0]?.id ?? 'sent-as-template');
+        usedTemplate = true;
+      }
     }
-    return { messageIds: ids, target: to };
+    return { messageIds: ids, target: to, group: recipientType === 'group', viaTemplate: usedTemplate };
   },
 };
 

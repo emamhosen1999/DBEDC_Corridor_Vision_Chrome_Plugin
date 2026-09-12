@@ -49,7 +49,10 @@ export const uniview = {
   },
 
   async health(host, opts) {
-    const out = { ok: true, vendor: 'uniview', warnings: [] };
+    // `findings` are structured so the alarm mapper can key off a code rather than
+    // pattern-matching English prose. `warnings` stays as the human rendering.
+    const out = { ok: true, vendor: 'uniview', warnings: [], findings: [] };
+    const finding = (code, detail, value) => { out.findings.push({ code, detail, value }); out.warnings.push(detail); };
     const [info, time, storage] = await Promise.all([
       lapi(host, '/System/DeviceInfo', opts),
       lapi(host, '/System/Time', opts).catch(() => ({ ok: false })),
@@ -69,10 +72,10 @@ export const uniview = {
       const camMs = Date.parse(t.TimeZone ? `${t.DateTime}` : t.DateTime ?? '');
       if (Number.isFinite(camMs)) {
         out.driftSec = Math.round((camMs - Date.now()) / 1000);
-        if (Math.abs(out.driftSec) > 60) out.warnings.push(`clock drift ${out.driftSec}s`);
+        if (Math.abs(out.driftSec) > 60) finding('CLOCK_DRIFT', `clock drift ${out.driftSec}s`, out.driftSec);
       }
       out.ntpEnabled = t.NTPEnable === 1 || t.NTPEnable === true;
-      if (out.ntpEnabled === false) out.warnings.push('NTP disabled');
+      if (out.ntpEnabled === false) finding('NTP_LOST', 'NTP is disabled on the camera');
     }
 
     if (storage.ok) {
@@ -84,10 +87,11 @@ export const uniview = {
         freeMB: s.FreeSpace ?? s.Free ?? null,
       }));
       for (const s of out.storage) {
-        const bad = /error|fail|abnormal|unformat|none/i.test(String(s.status));
-        if (bad) out.warnings.push(`storage ${s.name}: ${s.status}`);
+        if (/error|fail|abnormal|unformat|none/i.test(String(s.status))) {
+          finding('STORAGE_FAIL', `storage ${s.name}: ${s.status}`, s.status);
+        }
         if (Number.isFinite(s.totalMB) && Number.isFinite(s.freeMB) && s.totalMB > 0 && (s.freeMB / s.totalMB) < 0.02) {
-          out.warnings.push(`storage ${s.name} nearly full`);
+          finding('STORAGE_FULL', `storage ${s.name} is nearly full`, Math.round((s.freeMB / s.totalMB) * 100));
         }
       }
     }

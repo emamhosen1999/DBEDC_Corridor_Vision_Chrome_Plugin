@@ -38,16 +38,17 @@ export const hikvision = {
     if (!info.ok) return { ok: false, vendor: 'hikvision', reason: info.reason, status: info.status };
 
     const out = {
-      ok: true, vendor: 'hikvision', warnings: [],
+      ok: true, vendor: 'hikvision', warnings: [], findings: [],
       model: pick(info.xml, 'model'),
       firmware: pick(info.xml, 'firmwareVersion'),
       serial: pick(info.xml, 'serialNumber'),
     };
+    const finding = (code, detail, value) => { out.findings.push({ code, detail, value }); out.warnings.push(detail); };
     if (status.ok) {
       const up = Number(pick(status.xml, 'deviceUpTime'));
       if (Number.isFinite(up)) out.uptimeSec = up;
       const cpu = Number(pick(status.xml, 'cpuUtilization'));
-      if (Number.isFinite(cpu)) { out.cpuPct = cpu; if (cpu > 92) out.warnings.push(`CPU ${cpu}%`); }
+      if (Number.isFinite(cpu)) { out.cpuPct = cpu; if (cpu > 92) finding('CPU_HIGH', `CPU at ${cpu}%`, cpu); }
       const mem = Number(pick(status.xml, 'memoryUsage'));
       if (Number.isFinite(mem)) out.memoryUsage = mem;
     }
@@ -56,8 +57,8 @@ export const hikvision = {
       const free = Number(pick(storage.xml, 'freeSpace'));
       const cap = Number(pick(storage.xml, 'capacity'));
       out.storage = [{ name: 'hdd1', status: status1, totalMB: cap, freeMB: free }];
-      if (status1 && !/ok|正常/i.test(status1)) out.warnings.push(`storage ${status1}`);
-      if (Number.isFinite(free) && Number.isFinite(cap) && cap > 0 && free / cap < 0.02) out.warnings.push('storage nearly full');
+      if (status1 && !/ok|正常/i.test(status1)) finding('STORAGE_FAIL', `storage reports "${status1}"`, status1);
+      if (Number.isFinite(free) && Number.isFinite(cap) && cap > 0 && free / cap < 0.02) finding('STORAGE_FULL', 'storage is nearly full', Math.round((free / cap) * 100));
     }
     return out;
   },

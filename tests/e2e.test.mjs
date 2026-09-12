@@ -41,7 +41,12 @@ test.before(async () => {
     },
     detect: { confirmDownCycles: 1, confirmUpCycles: 1 },
     alerts: { coalesceSec: 0, minSeverity: 'info', digest: { enabled: false }, watchdog: { enabled: false } },
-    channels: { console: { enabled: false }, dashboard: { enabled: false }, desktop: { enabled: false } },
+    // `capture` is declared here rather than injected at runtime so it survives the
+    // config-save test, which legitimately replaces cfg.channels wholesale.
+    channels: {
+      console: { enabled: false }, dashboard: { enabled: false }, desktop: { enabled: false },
+      capture: { enabled: true, routes: {} },
+    },
   }, null, 2));
 
   const { loadConfig } = await import('../src/core/config.mjs');
@@ -62,7 +67,6 @@ test.before(async () => {
   const { DashboardServer } = await import('../src/server/http.mjs');
   engine = new Engine({ cfg });
   // Capture everything that would be sent, instead of sending it.
-  cfg.channels.capture = { enabled: true, routes: {} };
   engine.channels.capture = { name: 'capture', validate: () => [], send: async (m) => { delivered.push(m); return {}; } };
   server = new DashboardServer({ cfg, engine });
   engine.broadcast = (e, d) => server.broadcast(e, d);
@@ -211,6 +215,110 @@ test('ad-hoc probing works through the API', async () => {
   assert.equal(status, 200);
   assert.equal(body.status, 'up', `${body.reason}: ${body.detail}`);
   assert.ok(body.layers.rtsp.ok);
+});
+
+test('the alarm register raises catalogued alarms from probe results', async () => {
+  const { body } = await api('/api/alarms');
+  assert.equal(body.enabled, true);
+  const stream = body.alarms.find((a) => a.tag === 'VID_STREAM_FAIL');
+  assert.ok(stream, `expected VID_STREAM_FAIL for the RTSP-dead camera; saw ${body.alarms.map((a) => a.tag).join(', ')}`);
+  assert.equal(stream.state, 'unack-alarm');
+  assert.ok(stream.correctiveAction, 'an alarm must arrive with its corrective action');
+  assert.ok(stream.timeToRespond);
+});
+
+test('an alarm can be acknowledged and shelved through the API', async () => {
+  const { body } = await api('/api/alarms');
+  const target = body.alarms[0];
+  assert.ok(target, 'expected at least one alarm to act on');
+
+  const ack = await api('/api/alarms/ack', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key: target.key, by: 'test-operator' }),
+  });
+  assert.equal(ack.status, 200);
+  assert.equal(ack.body.acknowledged, 1);
+
+  // Shelving without a reason must be refused.
+  const noReason = await api('/api/alarms/shelve', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key: target.key, hours: 2 }),
+  });
+  assert.equal(noReason.status, 400);
+
+  const shelved = await api('/api/alarms/shelve', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key: target.key, hours: 2, reason: 'contractor on site' }),
+  });
+  assert.equal(shelved.status, 200);
+  assert.ok(shelved.body.until > Date.now());
+});
+
+test('the watchdog alarm refuses to be shelved', async () => {
+  engine.register.assert('SYS_MONITOR_STALLED', true, { id: null, name: 'site' }, { detail: 'test' });
+  const res = await api('/api/alarms/shelve', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key: 'SYS_MONITOR_STALLED', hours: 1, reason: 'noisy' }),
+  });
+  assert.equal(res.status, 400);
+  assert.match(res.body.error, /monitoring system itself/);
+  engine.register.assert('SYS_MONITOR_STALLED', false, { id: null, name: 'site' });
+});
+
+test('alarm KPIs are computed against EEMUA targets', async () => {
+  const { status, body } = await api('/api/alarms/kpi?hours=24');
+  assert.equal(status, 200);
+  assert.ok(body.rate.target > 0);
+  assert.ok(['acceptable', 'manageable', 'above target'].includes(body.rate.verdict));
+  assert.ok(body.overall.summary.length > 20);
+});
+
+test('the alarm catalogue is served with full rationalisation', async () => {
+  const { body } = await api('/api/alarms/catalog');
+  assert.ok(body.tags.length > 25);
+  for (const tag of body.tags) {
+    const d = body.catalog[tag];
+    assert.ok(d.cause && d.consequence && d.correctiveAction, `${tag} is not fully rationalised`);
+  }
+});
+
+test('a report can be issued through the API and covers every device', async () => {
+  const { status, body } = await api('/api/reports/send', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ label: 'Integration test' }),
+  });
+  assert.equal(status, 200);
+  assert.match(body.reportId, /^CV-/);
+  assert.equal(body.devices, 2, 'the register must cover both cameras');
+  assert.ok(body.files.includes('json'));
+
+  const listed = await api('/api/reports');
+  assert.ok(listed.body.reports.some((r) => r.reportId === body.reportId));
+});
+
+test('the issued report reached a delivery channel as text', async () => {
+  const { drainQueue } = await import('../src/alerts/channels/index.mjs');
+  await engine.bus.flush();
+  await drainQueue(engine.channels, cfg);
+  const report = delivered.find((d) => d.alertType === 'report.scheduled');
+  if (!report) {
+    // Diagnose rather than just fail: the usual cause is the hourly rate cap, which
+    // this suite can legitimately hit by firing a whole day's traffic in seconds.
+    const counts = delivered.reduce((m, d) => ({ ...m, [d.alertType]: (m[d.alertType] ?? 0) + 1 }), {});
+    assert.fail(`no report delivery. maxPerHour=${cfg.alerts.maxPerHour}, delivered ${delivered.length}: ${JSON.stringify(counts)}`);
+  }
+  assert.ok(report, `expected a report delivery; saw ${[...new Set(delivered.map((d) => d.alertType))].join(', ')}`);
+  assert.match(report.text, /CAMERA SYSTEM STATUS REPORT/);
+  assert.match(report.text, /DEVICE REGISTER/);
+  assert.match(report.text, /Healthy Cam/, 'the full register must name every device, not just the faulty one');
+});
+
+test('report preview does not consume a sequence number', async () => {
+  const before = (await api('/api/reports')).body.reports.length;
+  const preview = await api('/api/reports/preview?format=text&hours=6');
+  assert.equal(preview.status, 200);
+  assert.match(preview.body.reportId, /PREVIEW$/);
+  assert.equal((await api('/api/reports')).body.reports.length, before);
 });
 
 test('a heartbeat file is written for external supervision', () => {

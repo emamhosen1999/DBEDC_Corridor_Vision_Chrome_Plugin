@@ -43,9 +43,19 @@ export const TYPE_SEVERITY = {
   'digest.scheduled': 'info',
   'report.manual': 'info',
   'channel.test': 'info',
+  // Alarm-register annunciations. Severity comes from the alarm's own priority, so
+  // these table entries are only the fallback when one is somehow missing.
+  'alarm.raised': 'warning',
+  'alarm.cleared': 'info',
+  'alarm.acknowledged': 'info',
+  'alarm.unshelved': 'info',
+  'report.scheduled': 'info',
 };
 
 export const severityOf = (alert) => alert.severity ?? TYPE_SEVERITY[alert.type] ?? 'info';
+
+const PRIORITY_ICON = { critical: '🚨', high: '🔴', medium: '🟠', low: '🟡', diagnostic: '🔵' };
+const PRIORITY_WORD = { critical: 'CRITICAL', high: 'HIGH', medium: 'MEDIUM', low: 'LOW', diagnostic: 'DIAGNOSTIC' };
 export const atLeast = (severity, floor) => SEVERITY_RANK[severity] >= SEVERITY_RANK[floor];
 
 const clean = (s) => String(s ?? '').trim();
@@ -209,6 +219,57 @@ export function renderAlert(alert, cfg) {
         for (const w of alert.worst.slice(0, 10)) L.push(`• ${clean(w.name)} — ${w.uptimePct}% (${plural(w.outages, 'outage')})`);
       }
       break;
+    case 'alarm.raised': {
+      const items = alert.items ?? [alert];
+      const worst = items.reduce((w, a) => (SEVERITY_RANK[severityOf(a)] > SEVERITY_RANK[severityOf(w)] ? a : w), items[0]);
+      const pIcon = PRIORITY_ICON[worst.priority] ?? icon;
+      title = items.length === 1
+        ? `${pIcon} ${PRIORITY_WORD[worst.priority] ?? ''} — ${clean(worst.name)}${worst.subject?.name ? `: ${clean(worst.subject.name)}` : ''}`
+        : `${pIcon} ${plural(items.length, 'alarm')} raised`;
+      L.push(title, '');
+      for (const a of items.slice(0, 15)) {
+        const icon2 = PRIORITY_ICON[a.priority] ?? '•';
+        L.push(`${icon2} *${clean(a.name)}*${a.subject?.name ? ` — ${clean(a.subject.name)}` : ''}`);
+        if (a.subject?.group) L.push(`   Zone: ${clean(a.subject.group)}`);
+        if (a.detail) L.push(`   ${a.detail}`);
+        // The whole point of rationalising an alarm is that the message can say what
+        // to do about it. An alarm that arrives without an action is just noise.
+        if (a.definition?.correctiveAction) L.push(`   ➤ ${a.definition.correctiveAction}`);
+        if (a.definition?.timeToRespond && a.definition.timeToRespond !== 'None') {
+          L.push(`   ⏱ Respond within: ${a.definition.timeToRespond}`);
+        }
+        if (a.occurrences > 1) L.push(`   (occurrence ${a.occurrences})`);
+        L.push('');
+      }
+      if (items.length > 15) L.push(`…and ${items.length - 15} more`);
+      L.push(`Acknowledge on the dashboard, or reply to the operator on duty.`);
+      break;
+    }
+    case 'alarm.cleared': {
+      const items = alert.items ?? [alert];
+      title = items.length === 1
+        ? `✅ Cleared — ${clean(items[0].name)}${items[0].subject?.name ? `: ${clean(items[0].subject.name)}` : ''}`
+        : `✅ ${plural(items.length, 'alarm')} cleared`;
+      L.push(title, '');
+      for (const a of items.slice(0, 20)) {
+        L.push(`🟢 ${clean(a.name)}${a.subject?.name ? ` — ${clean(a.subject.name)}` : ''}`
+          + `${a.durationMs ? ` (after ${fmtDuration(a.durationMs)})` : ''}`);
+        if (a.acknowledged === false) L.push('   ⚠ Cleared before it was acknowledged — still shown on the annunciator.');
+      }
+      break;
+    }
+    case 'alarm.unshelved':
+      title = `🔔 Alarm returned to service — ${clean(alert.name)}`;
+      L.push(title, '');
+      L.push(`${clean(alert.name)}${alert.subject?.name ? ` — ${clean(alert.subject.name)}` : ''}`);
+      if (alert.expired) L.push(`The shelf expired. Original reason: ${alert.reason ?? 'not stated'}.`);
+      if (alert.stillPresent) L.push('The condition is still present, so the alarm has re-annunciated.');
+      break;
+    case 'alarm.acknowledged':
+      title = `👍 Acknowledged — ${clean(alert.name)}`;
+      L.push(title, '', `Acknowledged by ${alert.by ?? 'operator'}${alert.note ? `: ${alert.note}` : ''}.`);
+      break;
+    case 'report.scheduled':
     case 'digest.scheduled':
     case 'report.manual':
       // The digest is composed by buildDigest() and arrives fully rendered.

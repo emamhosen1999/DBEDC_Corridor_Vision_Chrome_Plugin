@@ -113,9 +113,131 @@ Validated against reference images: a true-black frame measures `0.0`, mid-grey
 
 ---
 
-## Alerts
+## Alarms and reporting
 
-### Alert types
+Alarm management follows **ISA-18.2 / IEC 62682**; alarm-system performance is measured
+against **EEMUA 191**. Full detail in [`docs/ALARMS.md`](docs/ALARMS.md).
+
+### The two things this gives you
+
+**1. A regular all-device report.** Every device, on a schedule, in four formats.
+Not a list of what is broken — a complete register, because *"what is broken"* and
+*"what was checked"* are different questions and only the second evidences coverage.
+
+**2. A real alarm system.** 37 rationalised alarm types with an acknowledgement
+lifecycle, shelving, suppression and self-measurement — not a stream of notifications
+that scroll away unread.
+
+### Alarm catalogue
+
+37 types across ten classes. Every one carries its **cause**, **consequence**,
+**corrective action** and **time to respond** — and those ship in the message, not just
+the docs:
+
+```
+🚨 CRITICAL — Zone communication loss — all cameras: Zone 3 - Bhulta
+
+🚨 *Zone communication loss — all cameras* — Zone 3 - Bhulta
+   All 12 cameras in Zone 3 - Bhulta are unreachable — one shared fault,
+   not 12 separate camera faults.
+   ➤ DO NOT dispatch to individual camera poles. Check, in order: power to the
+     zone cabinet; the zone switch and its port LEDs; the uplink back to the
+     control room.
+   ⏱ Respond within: Immediate
+```
+
+| Class | Types | Covers |
+|---|---|---|
+| communication | 7 | reachability, credentials, flapping, latency, restarts, sustained outage |
+| video | 8 | stream failure, black, frozen, tamper, overexposure, codec/resolution drift |
+| storage | 2 | SD/disk failure, near-full |
+| time | 2 | clock drift, NTP loss |
+| network | 3 | zone dark, site-wide outage, monitoring path lost |
+| security | 1 | unregistered device on the camera network |
+| inventory | 2 | cameras added to / removed from monitoring |
+| system | 6 | monitor stalled, disk low, cycle overrun, **alert channel failing** |
+| availability | 2 | daily and per-device SLA breach |
+| alarm-system | 4 | flood, chattering, standing, shelf expiry |
+
+Only **four** conditions are critical — site outage, zone dark, monitoring stalled, and
+alarms failing to be delivered. Neither of the last two can be shelved or suppressed: a
+monitor that can be silenced about its own failure is not a monitor.
+
+```powershell
+node src\cli.mjs alarms --catalog --verbose   # the whole rationalised catalogue
+node src\cli.mjs alarms                       # annunciator + EEMUA KPIs
+```
+
+### Alarm lifecycle
+
+`NORMAL → UNACK_ALARM → ACK_ALARM → NORMAL`, plus `RTN_UNACK` for an alarm that cleared
+before anyone saw it — a camera that dropped at 03:00 and recovered at 03:04 stays on
+the annunciator until the morning shift acknowledges it. Without that state, short
+overnight outages vanish before anyone knows they happened.
+
+Shelving requires a **stated reason** and **always expires** (capped, default 24h).
+Permanent silence is how alarm systems rot.
+
+### Alarm system performance — EEMUA 191
+
+Measured every reporting period, with verdicts:
+
+| Metric | Target |
+|---|---|
+| Average alarm rate | ≤ 6/hour per operator |
+| Peak in any 10 minutes | ≤ 10 |
+| Time in alarm flood | < 1% |
+| Standing alarms | < 5 |
+| Top 10 contributors | ≤ 5% of load |
+
+The premise, which is counter-intuitive and load-bearing: **an alarm system is measured
+by how few alarms it produces.** 400 alarms a shift is not more detection, it is an
+unreadable system whose users have learned to ignore it.
+
+### The periodic report
+
+| § | Section |
+|---|---|
+| 1 | Executive summary — findings in prose, not numbers |
+| 2 | Fleet status and per-zone rollup |
+| 3 | Alarm summary — raised, cleared, outstanding, held, by priority |
+| 4 | Zone breakdown |
+| 5 | Action required — every exception with its finding |
+| 6 | **Device register — every device** |
+| 7 | Availability — fleet %, worst performers, daily rows |
+| 8 | Alarm system performance (EEMUA 191) |
+| 9 | Monitoring system health — coverage gaps, staleness |
+
+Issued as `CV-DBE-20260912-003`: site code, local date, sequence number. The sequence is
+persisted, so **a gap in it is evidence a report was missed**. Text goes to chat
+(chunked on section boundaries), HTML to email and print, CSV to spreadsheets, JSON to
+other systems — all four filed as the report of record.
+
+A report generated while monitoring is stale says so as its **first line**, because it
+is describing history, not now.
+
+```jsonc
+"reporting": {
+  "enabled": true,
+  "mode": "times",
+  "times": ["06:00", "14:00", "22:00"],
+  "fullRegister": true,
+  "formats": ["text", "html", "csv", "json"],
+  "sendWhenHealthy": true      // keep this on — see below
+}
+```
+
+Keep `sendWhenHealthy: true`. A report that only arrives when there is bad news is
+indistinguishable from a dead monitor; the regular arrival of a boring report is itself
+the evidence the system is alive.
+
+```powershell
+node src\cli.mjs reports                    # preview
+node src\cli.mjs reports --list             # reports of record
+node src\cli.mjs reports --issue            # issue and file (does not send)
+```
+
+### Notification types
 
 | Type | Severity | Raised when |
 |---|---|---|
@@ -132,6 +254,8 @@ Validated against reference images: a true-black frame measures `0.0`, mid-grey
 | `inventory.added` / `removed` | info | A camera appeared in or vanished from the inventory |
 | `sla.breach` | warning | Daily availability fell below target |
 | `digest.scheduled` | info | Scheduled status digest |
+| `report.scheduled` | info | The periodic all-device report |
+| `alarm.raised` / `cleared` | per priority | Alarm register annunciations |
 
 ### Noise control
 
@@ -155,10 +279,10 @@ that people stop reading them. Seven mechanisms, all configurable:
 
 | Channel | Real groups? | Needs | Notes |
 |---|---|---|---|
-| **WhatsApp — GREEN API** | ✅ | Account, QR link | **Recommended.** Hosted; addresses a group by `…@g.us`. |
-| **WhatsApp — WAHA** | ✅ | Docker on your own box | **Recommended.** Self-hosted, free, data stays in-house. |
+| **WhatsApp — Meta Cloud API** | ✅ max 8 | Official Business Account | **Recommended for you.** Official and supported; nothing to keep linked. Read the 24-hour window note below — it decides whether your 3am alarms arrive. |
+| **WhatsApp — GREEN API** | ✅ | Account, QR link | Hosted gateway, unlimited group size. |
+| **WhatsApp — WAHA** | ✅ | Docker on your own box | Self-hosted, free, data stays in-house. |
 | **WhatsApp — Web automation** | ✅ | `npm i whatsapp-web.js` | Zero infrastructure. **Unofficial** — see below. |
-| **WhatsApp — Meta Cloud API** | ⚠️ max 8 | Official Business Account | Groups capped at **8 participants**. Fine for 1:1 on-call. |
 | **WhatsApp — CallMeBot** | ❌ | Nothing | Free, individual numbers only, personal use. |
 | **Telegram** | ✅ | A bot token | Free, instant, and it does not break. **Enable this as a backup.** |
 | **Slack / Teams / Discord** | ✅ | An incoming webhook | |
@@ -167,40 +291,63 @@ that people stop reading them. Seven mechanisms, all configurable:
 | **Windows toast** | — | — | See the session-0 caveat below. |
 | **Dashboard** | — | — | SSE push + browser notification. Always works. |
 
-#### Straight answer on WhatsApp groups
+#### WhatsApp Cloud API — the 24-hour window will bite you
 
-There is no officially sanctioned way to post to a normal WhatsApp group from software.
-Meta's Groups API exists but caps groups at **8 participants** and requires an Official
-Business Account — unusable for an ops group, and you have said you do not have a
-business account.
+You have an Official Business Account and an 8-person group is acceptable, so the Cloud
+API is the right primary route: official, supported, no QR session to keep alive.
 
-That leaves three routes that genuinely work, and you should pick on infrastructure:
+**But read this before relying on it.** Meta only delivers free-form text inside a
+24-hour *customer service window*, opened by someone messaging the business number.
+A monitoring system raises its most important alarms at 03:00, long after that window
+has lapsed — and Meta **rejects** those with error 131047 rather than delivering them.
+A monitor whose alerts are silently refused overnight is worse than no monitor.
 
-- **GREEN API** — hosted, paid, nothing to run. Easiest.
-- **WAHA** — one Docker container you own. Free, private. Best if you have a server.
-- **whatsapp-web.js** — no server at all, but it automates WhatsApp Web with your own
-  account, which WhatsApp's terms do not sanction. For an internal ops group on a
-  company number the practical risk is low; it is not zero, and WhatsApp can break the
-  web client at any time.
+The fix is an approved **message template**, which is delivered at any time. This
+channel sends free-form text and, on a window rejection, automatically re-sends the same
+alert as a template. Configure one and the 3am alarm arrives; skip it and it will not —
+`doctor` warns you about exactly this.
 
-That last risk is exactly why it is an optional dependency: if it breaks, nothing else
-in the system does. **Enable Telegram alongside whichever you choose.** It costs
-nothing and it is the channel that will still be delivering when WhatsApp has a bad week.
+Create it in WhatsApp Manager → Message templates, category **UTILITY**, with a body of
+exactly one variable:
+
+```
+Corridor Vision alert:
+
+{{1}}
+```
+
+Then:
 
 ```powershell
-# GREEN API
-node src\cli.mjs secret set whatsappGreen.apiToken "<token>"
-# then set idInstance and chatId (…@g.us) in config/config.json, and:
-node src\cli.mjs test-alert --channel whatsappGreen
+node src\cli.mjs secret set whatsappCloud.accessToken "<token>"
+node src\cli.mjs wa-groups                      # list groups and read the group id
+node src\cli.mjs test-alert --channel whatsappCloud
+```
 
-# WhatsApp Web (zero infrastructure)
-npm install whatsapp-web.js qrcode-terminal
-node src\cli.mjs wa-login          # scan the QR once; the session persists
+```jsonc
+"whatsappCloud": {
+  "enabled": true,
+  "phoneNumberId": "<from Meta App → WhatsApp → API Setup>",
+  "accessToken": "@vault:whatsappCloud.accessToken",
+  "to": "<group id from wa-groups>",
+  "recipientType": "group",
+  "template": { "name": "corridor_alert", "languageCode": "en" }
+}
+```
 
-# Telegram
+**Also enable Telegram.** It costs nothing, has no messaging window, no template
+approval and no participant cap, and it is the channel that will still be delivering
+when WhatsApp has a bad week. Treating one vendor as a single point of failure for
+alerting is the same mistake as trusting one server to report its own death.
+
+```powershell
 node src\cli.mjs secret set telegram.botToken "123456:ABC-DEF…"
 node src\cli.mjs test-alert --channel telegram
 ```
+
+If the 8-participant cap becomes a problem later, **GREEN API** (hosted) or **WAHA**
+(self-hosted Docker) address unlimited-size groups by `chatId`, and switching is one
+config field.
 
 ---
 
@@ -248,6 +395,8 @@ no CDN (it loads on a PC with no internet).
 - **Cameras** — searchable, filterable, sortable table; probe any camera on demand; CSV export
 - **Timeline** — every event, filterable to outages, escalations, flapping or monitor health
 - **Uptime** — availability trend, per-camera uptime, outage count, MTTR, longest outage
+- **Alarms** — the annunciator with acknowledge / shelve / return-to-service, each alarm showing its required action and its consequence if ignored, plus live EEMUA 191 metrics
+- **Reports** — reports of record, preview in any format, issue-and-send
 - **Alerts** — channel status with one-click test send, live delivery queue, delivery history
 - **Settings** — monitoring and alerting config, credential vault, CSV import, subnet discovery
 
@@ -268,6 +417,12 @@ node src\cli.mjs secret   set <name> <value>    store a credential (encrypted)
 node src\cli.mjs test-alert --channel telegram  send a test message
 node src\cli.mjs report   --format offline      print a shareable report
 node src\cli.mjs doctor                         check everything and say what is wrong
+node src\cli.mjs alarms                         the annunciator + EEMUA 191 KPIs
+node src\cli.mjs alarms --catalog --verbose     the rationalised alarm catalogue
+node src\cli.mjs reports                        preview the all-device report
+node src\cli.mjs reports --list                 reports of record
+node src\cli.mjs reports --issue                issue and file one (does not send)
+node src\cli.mjs wa-groups                      list WhatsApp groups (Cloud API)
 node src\cli.mjs wa-login                       link WhatsApp Web by QR
 ```
 
@@ -343,6 +498,7 @@ data/state.json           current truth (atomic writes, mutex-guarded)
 data/events/*.jsonl       append-only transition log, rotated daily
 data/snapshots/*.jsonl    one fleet sample per cycle, feeds the SLA figures
 data/outbox.json          the delivery queue — survives restarts
+data/exports/reports/     reports of record, by date (text, HTML, CSV, JSON)
 data/heartbeat.json       for external supervision
 logs/corridor-*.log       structured NDJSON, size-rotated and age-pruned
 ```
@@ -354,7 +510,7 @@ Retention defaults: events 180 days, samples 14 days, logs 30 days.
 ## Testing
 
 ```bash
-npm test        # 103 tests
+npm test        # 163 tests
 ```
 
 The tests run against **real protocol servers**, not mocks: `tests/helpers/fake-camera.mjs`
@@ -392,6 +548,7 @@ Get-Content logs\corridor-*.log -Tail 40 -Wait
 
 ## Documents
 
+- [`docs/ALARMS.md`](docs/ALARMS.md) — alarm philosophy, the full catalogue, the report specification
 - [`docs/AUDIT.md`](docs/AUDIT.md) — the brutal audit of the Chrome extension: 47 findings, graded
 - [`docs/RUNBOOK.md`](docs/RUNBOOK.md) — day-to-day operator procedures
 - [`CHANGELOG.md`](CHANGELOG.md) — what changed and why

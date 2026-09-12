@@ -235,6 +235,103 @@ async function cmdReport(args) {
   print(await engine.buildReport(args.format ?? 'full'));
 }
 
+/* -------------------------------------------------------------- alarms --- */
+
+async function cmdAlarms(args) {
+  const cfg = loadConfig();
+  configureLogger({ level: 'error', file: false });
+  const { AlarmRegister, effectivePriority } = await import('./alarms/register.mjs');
+  const { CATALOG, TAGS, byClass } = await import('./alarms/catalog.mjs');
+  const { alarmKpis } = await import('./alarms/kpi.mjs');
+  const state = await loadState();
+  const register = new AlarmRegister({ cfg, notify: () => {} }).load(state.alarms ?? {});
+
+  if (args.catalog) {
+    print('\nAlarm catalogue — what this system can annunciate, and why.\n');
+    for (const [cls, defs] of byClass()) {
+      print(`  ${String(cls).toUpperCase()}`);
+      for (const d of defs) {
+        print(`    ${d.priority.padEnd(10)} ${d.tag.padEnd(24)} ${d.name}`);
+        if (args.verbose) {
+          print(`               cause:  ${d.cause}`);
+          print(`               action: ${d.correctiveAction}`);
+          print(`               within: ${d.timeToRespond}\n`);
+        }
+      }
+      print('');
+    }
+    print(`${TAGS.length} alarm types defined.`);
+    return;
+  }
+
+  const icon = { critical: '🚨', high: '🔴', medium: '🟠', low: '🟡', diagnostic: '🔵' };
+  const list = args.all ? [...register.instances.values()] : register.annunciated();
+  print('');
+  if (!list.length) {
+    print('  ✅ No alarms requiring attention.');
+  } else {
+    for (const i of list) {
+      const p = effectivePriority(i);
+      print(`  ${icon[p] ?? '•'} ${p.padEnd(9)} ${i.tag.padEnd(22)} ${(i.subjectName ?? '—').padEnd(24)} ${i.state}`);
+      if (args.verbose && CATALOG[i.tag]) print(`      ➤ ${CATALOG[i.tag].correctiveAction}`);
+    }
+  }
+
+  const k = await alarmKpis({ sinceTs: Date.now() - 86_400_000, register, operatorPositions: cfg.alarms?.operatorPositions ?? 1 });
+  print('');
+  print('  Alarm system performance (last 24h, EEMUA 191)');
+  print(`    ${k.overall.status === 'acceptable' ? '✓' : '✗'} ${k.overall.summary}`);
+  print(`      rate ${k.rate.perHour}/h (target ≤${k.rate.target}) · peak ${k.peak.value} (≤${k.peak.target}) · flood ${k.flood.pct}% (<${k.flood.target}%) · standing ${k.standing.count} (<${k.standing.target})`);
+  print('');
+}
+
+/* ------------------------------------------------------------- reports --- */
+
+async function cmdReports(args) {
+  const cfg = loadConfig();
+  configureLogger({ level: 'error', file: false });
+  const { listReports, readReport, nextDue, produceReport } = await import('./report/scheduler.mjs');
+  const { buildReportModel } = await import('./report/model.mjs');
+  const { render } = await import('./report/render.mjs');
+  const { AlarmRegister } = await import('./alarms/register.mjs');
+  const state = await loadState();
+  const register = new AlarmRegister({ cfg, notify: () => {} }).load(state.alarms ?? {});
+
+  if (args.list) {
+    const reports = await listReports({ limit: Number(args.limit) || 30 });
+    if (!reports.length) { print('\nNo reports have been issued yet.'); return; }
+    print('\nReports of record:\n');
+    for (const r of reports) print(`  ${r.reportId.padEnd(26)} ${r.formats.join(', ')}`);
+    const due = nextDue(cfg, { lastIssuedAt: state.reporting?.lastIssuedAt ?? 0 });
+    if (due) print(`\nNext scheduled report: ${new Date(due.dueAt).toISOString()}`);
+    return;
+  }
+
+  if (args.read) {
+    const body = await readReport(args.read, args.format ?? 'text');
+    if (body === null) { print(`No stored report "${args.read}" in format "${args.format ?? 'text'}".`); process.exitCode = 1; return; }
+    print(body);
+    return;
+  }
+
+  if (args.issue) {
+    // Writes the report of record and numbers it, but does not send it — sending is
+    // the service's job, and a CLI run should not silently page the whole duty roster.
+    const out = await produceReport({ cfg, register, label: 'Manual report (CLI)', trigger: 'manual' });
+    print(`\nIssued ${out.model.meta.reportId} covering ${out.model.devices.length} devices.`);
+    for (const [format, file] of Object.entries(out.files)) print(`  ${format.padEnd(10)} ${file}`);
+    print('\nThis was written to disk but NOT sent. Use the dashboard, or POST /api/reports/send, to send it.');
+    return;
+  }
+
+  const hours = Number(args.hours) || 6;
+  const model = await buildReportModel({
+    cfg, register, periodMs: hours * 3_600_000, label: 'Preview', trigger: 'preview', sequence: { number: 0 },
+  });
+  const body = render(model, args.format ?? 'text', { fullRegister: true, maxChars: 1e9 });
+  print(Array.isArray(body) ? body.join('\n') : body);
+}
+
 /* -------------------------------------------------------------- doctor --- */
 
 async function cmdDoctor() {
@@ -291,10 +388,53 @@ async function cmdDoctor() {
   const q = await queueStats();
   print(`  ${q.pending === 0 ? '✓' : '⚠'} delivery queue: ${q.pending} pending`);
 
+  if (cfg.alarms?.enabled) {
+    const { AlarmRegister } = await import('./alarms/register.mjs');
+    const register = new AlarmRegister({ cfg, notify: () => {} }).load(state.alarms ?? {});
+    const ann = register.annunciated().length;
+    const standing = register.standing().length;
+    print(`  ${ann === 0 ? '✓' : '⚠'} alarms: ${ann} needing attention, ${standing} standing`);
+    if (standing >= 5) print('      EEMUA 191 targets fewer than 5 standing alarms — these are degrading the annunciator');
+  }
+
+  if (cfg.reporting?.enabled) {
+    const { nextDue } = await import('./report/scheduler.mjs');
+    const due = nextDue(cfg, { lastIssuedAt: state.reporting?.lastIssuedAt ?? 0 });
+    const last = state.reporting?.lastIssuedAt;
+    print(`  ${last ? '✓' : '⚠'} reporting: ${last ? `last ${fmtDuration(Date.now() - last)} ago` : 'none issued yet'}`
+      + `${due ? `, next ${fmtDuration(Math.max(0, due.dueAt - Date.now()))} from now` : ''}`);
+    if (!cfg.reporting.formats?.includes('text')) {
+      print('      reporting.formats has no "text" — chat channels cannot send this report');
+    }
+  } else {
+    print('  ⚠ scheduled reporting is disabled — nobody receives a regular all-device report');
+  }
+
   const disk = await diskPressure();
   print(`  ${disk.freePct > 10 ? '✓' : '✗'} disk: ${Math.round(disk.freePct)}% free at ${DIRS.data}`);
 
   print('');
+}
+
+/* ----------------------------------------------------------- wa-groups --- */
+
+async function cmdWaGroups() {
+  const cfg = loadConfig();
+  configureLogger({ level: 'error', file: false });
+  const { createChannels } = await import('./alerts/channels/index.mjs');
+  const channel = createChannels().whatsappCloud;
+  const groups = await channel.listGroups(cfg.channels.whatsappCloud);
+  if (!groups.length) {
+    print('\nThis business number is not in any groups yet.');
+    print('Create one in WhatsApp Manager, add the duty roster (max 8 participants),');
+    print('then re-run this command to read its id.');
+    return;
+  }
+  print('\nGroups this business number can post to:\n');
+  for (const g of groups) {
+    print(`  ${String(g.id).padEnd(28)} ${g.subject ?? g.name ?? '(no subject)'}`);
+  }
+  print('\nSet the one you want as channels.whatsappCloud.to, with recipientType "group".');
 }
 
 /* ------------------------------------------------------------ wa-login --- */
@@ -337,7 +477,10 @@ const COMMANDS = {
   'test-alert': cmdTestAlert,
   report: cmdReport,
   doctor: cmdDoctor,
+  alarms: cmdAlarms,
+  reports: cmdReports,
   'wa-login': cmdWaLogin,
+  'wa-groups': cmdWaGroups,
 };
 
 const argv = process.argv.slice(2);

@@ -1,0 +1,12 @@
+node_modules/
+data/
+logs/
+*.log
+config/config.json
+config/secrets.enc
+config/vault.key
+.env
+.DS_Store
+Thumbs.db
+coverage/
+*.tmp

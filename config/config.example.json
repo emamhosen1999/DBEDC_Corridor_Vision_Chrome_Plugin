@@ -1,0 +1,110 @@
+{
+  "_comment": "Copy to config.json and edit. Every option and its default is documented in src/core/config.mjs. Credentials do NOT go here — store them with: node src/cli.mjs secret set <name> <value>",
+
+  "site": {
+    "name": "Dhaka Bypass Expressway",
+    "operator": "DBEDC Corridor Vision",
+    "timezone": "Asia/Dhaka"
+  },
+
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8477,
+    "accessToken": ""
+  },
+
+  "monitor": {
+    "intervalSec": 60,
+    "concurrency": 40,
+    "gatewayCheck": {
+      "_comment": "SET THESE. Without reference hosts the monitor cannot tell its OWN network outage from a camera outage, and will report both identically.",
+      "enabled": true,
+      "hosts": ["192.189.6.1", "192.189.6.5"],
+      "port": 443
+    }
+  },
+
+  "probe": {
+    "icmp": { "enabled": true },
+    "tcp": { "ports": [554, 80, 8000] },
+    "onvif": { "enabled": true, "port": 80 },
+    "rtsp": { "enabled": true, "port": 554 },
+    "vendor": { "enabled": true, "defaultVendor": "uniview" },
+    "snapshot": { "enabled": true, "everyNCycles": 10 }
+  },
+
+  "detect": {
+    "_comment": "confirmDownCycles=2 means a camera must fail twice running before anyone is alerted. Setting it to 1 disables flap protection.",
+    "confirmDownCycles": 2,
+    "confirmUpCycles": 1,
+    "flapCount": 4,
+    "flapWindowMin": 30
+  },
+
+  "alerts": {
+    "enabled": true,
+    "minSeverity": "warning",
+    "coalesceSec": 90,
+    "maxPerHour": 30,
+    "quietHours": {
+      "enabled": false,
+      "from": "22:00",
+      "to": "07:00",
+      "overrideAtOrAbove": "critical"
+    },
+    "maintenance": [],
+    "digest": { "enabled": true, "times": ["09:00", "18:00"] },
+    "watchdog": { "enabled": true, "staleAfterSec": 300, "repeatEveryMin": 60 }
+  },
+
+  "channels": {
+    "_comment": "Enable ONE WhatsApp route and, as a backup that never breaks, Telegram.",
+
+    "telegram": {
+      "enabled": false,
+      "botToken": "@vault:telegram.botToken",
+      "chatId": "-1001234567890"
+    },
+
+    "whatsappGreen": {
+      "_comment": "Hosted gateway. Supports real groups. chatId ends in @g.us.",
+      "enabled": false,
+      "apiUrl": "https://api.green-api.com",
+      "idInstance": "",
+      "apiToken": "@vault:whatsappGreen.apiToken",
+      "chatId": "8801XXXXXXXXX-1581234048@g.us"
+    },
+
+    "whatsappWaha": {
+      "_comment": "Self-hosted (Docker). Supports real groups. No third party sees your messages.",
+      "enabled": false,
+      "baseUrl": "http://127.0.0.1:3000",
+      "session": "default",
+      "apiKey": "@vault:whatsappWaha.apiKey",
+      "chatId": "8801XXXXXXXXX-1581234048@g.us"
+    },
+
+    "whatsappWeb": {
+      "_comment": "No server needed. Run: npm i whatsapp-web.js qrcode-terminal && node src/cli.mjs wa-login",
+      "enabled": false,
+      "groupName": "DBEDC Corridor Ops"
+    },
+
+    "email": {
+      "enabled": false,
+      "host": "smtp.office365.com",
+      "port": 587,
+      "user": "alerts@example.com",
+      "pass": "@vault:email.pass",
+      "from": "alerts@example.com",
+      "to": ["ops@example.com"]
+    },
+
+    "webhook": {
+      "_comment": "Wire into n8n, Make, a ticketing system or an SMS gateway. Payloads are HMAC-SHA256 signed.",
+      "enabled": false,
+      "url": "https://example.com/hooks/corridor",
+      "secret": "@vault:webhook.secret"
+    }
+  }
+}

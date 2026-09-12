@@ -220,3 +220,25 @@ test('a camera that really has no stream is still reported as degraded', async (
   assert.equal(r.layers.rtsp.ok, false);
   assert.equal(r.status, STATUS.DEGRADED, 'reachable but not serving video');
 });
+
+test('an explicit RTSP URL is probed on ITS port, not the default 554', async (t) => {
+  // ONVIF GetStreamUri (and a configured rtspUrl) can name any port. Probing 554
+  // regardless reported a camera that serves video perfectly well as "refused".
+  const cam = await startFakeCamera({ requireAuth: false, rtspPath: '/unicast/c1/s0/live' });
+  t.after(() => cam.stop());
+
+  const r = await rtspProbe('127.0.0.1', {
+    explicitUrl: `rtsp://127.0.0.1:${cam.rtspPort}/unicast/c1/s0/live`,
+    timeoutMs: 4000,           // deliberately no `port`: the URL must supply it
+  });
+  assert.equal(r.ok, true, `explicit URL was not honoured: ${r.reason}`);
+  assert.equal(r.videoCodec, 'H265');
+
+  // A wrong port in the URL must still fail, so this is not just ignoring the port.
+  const bad = await rtspProbe('127.0.0.1', {
+    port: cam.rtspPort,        // the right port as an argument...
+    explicitUrl: 'rtsp://127.0.0.1:9/unicast/c1/s0/live',   // ...but the URL says 9
+    timeoutMs: 2000,
+  });
+  assert.equal(bad.ok, false, 'the URL port must win over the argument');
+});

@@ -180,9 +180,25 @@ export function rtspUrl(host, port, path) {
  */
 export async function rtspProbe(host, { port = 554, paths = ['/'], username, password, timeoutMs = 4000, method = 'DESCRIBE', explicitUrl = null } = {}) {
   const candidates = explicitUrl ? [explicitUrl] : paths.map((p) => rtspUrl(host, port, p));
+
+  // An explicit URL carries its own host and port, and they win. Connecting to the
+  // `port` argument instead (554 by default) meant a camera whose stream lives
+  // anywhere else - which is exactly what ONVIF GetStreamUri hands back on many
+  // devices - was probed on the wrong port and reported "refused" while serving
+  // video perfectly well.
+  let connectHost = host;
+  let connectPort = port;
+  if (explicitUrl) {
+    try {
+      const u = new URL(explicitUrl);
+      if (u.hostname) connectHost = u.hostname;
+      connectPort = u.port ? Number(u.port) : 554;   // RTSP's default, not `port`
+    } catch { /* not parseable: fall back to the arguments */ }
+  }
+
   const attempts = [];
   for (const url of candidates) {
-    const res = await converse(host, port, url, { method, username, password, timeoutMs });
+    const res = await converse(connectHost, connectPort, url, { method, username, password, timeoutMs });
     attempts.push({ url, ok: res.ok, reason: res.reason ?? null, status: res.status ?? null });
     if (res.ok) return { ...res, url, attempts };
     // Hard failures are about the server, not the path — stop wasting the budget.

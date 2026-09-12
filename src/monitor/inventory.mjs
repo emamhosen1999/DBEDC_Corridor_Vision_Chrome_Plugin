@@ -58,9 +58,15 @@ const COLUMN_ALIASES = {
   id:        ['id', 'cameraid', 'camera id', 'deviceid', 'device id', 'uuid'],
   name:      ['camera', 'cameraname', 'camera name', 'name', 'title', 'devicename', 'device name', 'description'],
   host:      ['ip', 'ipaddress', 'ip address', 'host', 'address', 'puip', 'deviceip', 'device ip'],
-  group:     ['organization', 'organisation', 'org', 'group', 'zone', 'site', 'area', 'location', 'chainage'],
-  vendor:    ['vendor', 'manufacturer', 'make', 'brand'],
-  model:     ['model', 'device', 'devicetype', 'device type', 'maindevname'],
+  // AIV-MP/VPAASPlat exports the zone as "Organization Name", not "Organization".
+  // Missing it is silent and expensive: every camera lands in "Ungrouped", which
+  // disables the per-zone rollup and with it NET_ZONE_DOWN - the alarm that turns
+  // twelve camera faults into one "the zone is dark".
+  group:     ['organization', 'organisation', 'org', 'group', 'zone', 'site', 'area', 'location', 'chainage',
+              'organization name', 'organisation name', 'org name', 'group name', 'zone name',
+              'area name', 'site name'],
+  vendor:    ['vendor', 'manufacturer', 'make', 'brand', 'device manufacturer'],
+  model:     ['model', 'device', 'devicetype', 'device type', 'maindevname', 'device model'],
   serial:    ['serial', 'serialnumber', 'serial number', 'sn'],
   rtspPort:  ['rtspport', 'rtsp port'],
   httpPort:  ['httpport', 'http port', 'webport', 'port'],
@@ -162,6 +168,9 @@ const slug = (s) => String(s).trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').r
 
 const TRUEISH = /^(1|y|yes|true|on|enabled|online)$/i;
 
+/** Manufacturer values that mean "not identified", not a make. */
+const PLACEHOLDER_VENDORS = new Set(['others', 'other', 'unknown', 'unknwon', 'n-a', 'na', 'none', 'generic', 'default', '-']);
+
 /** Turn a raw row object into a validated camera record. */
 export function normaliseCamera(raw, { defaults = {} } = {}) {
   const rec = { ...raw };
@@ -184,7 +193,14 @@ export function normaliseCamera(raw, { defaults = {} } = {}) {
 
   rec.enabled = rec.enabled === undefined || rec.enabled === '' ? true : TRUEISH.test(String(rec.enabled));
   if (rec.onvifEvents !== undefined) rec.onvifEvents = TRUEISH.test(String(rec.onvifEvents));
-  rec.vendor = rec.vendor ? slug(rec.vendor) : (defaults.vendor ?? null);
+  // A VMS export routinely carries a placeholder in the manufacturer column - AIV-MP
+  // writes "Others" for every camera it did not identify. Treating that as a vendor
+  // name would both pollute the device register and shadow the `--vendor` default,
+  // so a placeholder counts as absent.
+  const vendorRaw = rec.vendor ? slug(rec.vendor) : '';
+  rec.vendor = (vendorRaw && !PLACEHOLDER_VENDORS.has(vendorRaw))
+    ? vendorRaw
+    : (defaults.vendor ?? null);
 
   // A bare label like "cam-3" is a legal hostname but almost never resolves on a
   // camera VLAN — accept it, but say so rather than letting it fail silently later.

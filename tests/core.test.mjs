@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fmtDuration, inWindow, parseHHMM, minuteOfDay, dayKey, fmtTime } from '../src/core/time.mjs';
-import { deepMerge, validate, migrate, DEFAULTS } from '../src/core/config.mjs';
+import { deepMerge, validate, migrate, DEFAULTS, readJsonFile } from '../src/core/config.mjs';
 import { mapPool, singleFlight, createMutex, retry, withTimeout } from '../src/core/pool.mjs';
 import { parseChallenge, buildDigestHeader } from '../src/probe/digest.mjs';
 import { parseCsv, mapColumns, normaliseCamera, deriveId, assignIds, isValidHost } from '../src/monitor/inventory.mjs';
@@ -355,4 +355,74 @@ test('every alert type renders without throwing', () => {
     assert.ok(r.title && r.text, `${s.type} produced an empty message`);
     assert.ok(r.text.includes(cfg.site.name), `${s.type} lost the site footer`);
   }
+});
+
+/* ------------------------------------------------- config file encoding --- */
+
+test('config JSON loads despite a UTF-8 BOM (Windows commissioning)', () => {
+  // Windows PowerShell 5.1's `Set-Content -Encoding UTF8` and Notepad both prepend
+  // U+FEFF. scripts/setup.ps1 did exactly that, and the config it wrote could not be
+  // parsed at all - `doctor`, `run` and `selftest` every one refused to start.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cv-bom-'));
+  const file = path.join(dir, 'config.json');
+  try {
+    const body = JSON.stringify({ site: { name: 'Dhaka Bypass Expressway' } }, null, 2);
+
+    fs.writeFileSync(file, `﻿${body}`, 'utf8');
+    assert.throws(() => JSON.parse(fs.readFileSync(file, 'utf8')), 'a BOM really does break JSON.parse');
+    assert.equal(readJsonFile(file).site.name, 'Dhaka Bypass Expressway');
+
+    fs.writeFileSync(file, body, 'utf8');
+    assert.equal(readJsonFile(file).site.name, 'Dhaka Bypass Expressway', 'still fine without a BOM');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/* ------------------------------------------- AIV-MP / VPAASPlat CSV shape --- */
+
+// The real DBEDC export ("Camera Information_*.xlsx" -> CSV). Header spellings here
+// are verbatim from the platform; each one of these mappings was wrong before.
+const AIVMP_HEADERS = [
+  'Camera ID', 'Third-Party Camera ID', 'Interconnection Code', 'Camera Name',
+  'Main Device ID', 'Third-Party Main Device ID', 'Main Device Name', 'Platform ID',
+  'Platform Name', 'Registration Status', 'Organization ID', 'Organization Name',
+  'Administrative Area Code', 'Tenant ID', 'Tenant Name', 'Channel Number',
+  'mainDev Interconnect Code', 'IP Address', 'Access Server IP', 'Access Server Port',
+  'Device Manufacturer', 'Device Model', 'PTZ Type', 'Remarks',
+];
+
+test('AIV-MP "Organization Name" maps to the zone, not Ungrouped', () => {
+  const map = mapColumns(AIVMP_HEADERS);
+  assert.equal(map.group, 11, 'Organization Name is the zone');
+  assert.equal(map.host, 17, 'IP Address is the host');
+  assert.equal(map.name, 3);
+  // "Organization ID" precedes "Organization Name" and must not win the group slot.
+  assert.notEqual(map.group, 10);
+});
+
+test('a zone-less import would disable the zone-dark alarm, so group must survive', () => {
+  const { camera } = normaliseCamera({
+    name: 'K04+600 HD Box Camera East',
+    host: '11.151.11.115',
+    group: 'Dhaka Bypass Expressway/Fixed Bullet Cameras/EastBound K4 To K26',
+  });
+  assert.equal(camera.group, 'Dhaka Bypass Expressway/Fixed Bullet Cameras/EastBound K4 To K26');
+  assert.notEqual(camera.group, 'Ungrouped');
+});
+
+test('a placeholder manufacturer is not treated as a vendor', () => {
+  // AIV-MP writes "Others" for all 162 DBEDC cameras. Storing that as the make would
+  // shadow the --vendor default and put a fake manufacturer in the device register.
+  for (const placeholder of ['Others', 'Unknown', 'N/A', 'none', '-']) {
+    const { camera } = normaliseCamera({ name: 'c', host: '11.151.11.115', vendor: placeholder });
+    assert.equal(camera.vendor, null, `${placeholder} should not be a vendor`);
+  }
+  const withDefault = normaliseCamera(
+    { name: 'c', host: '11.151.11.115', vendor: 'Others' }, { defaults: { vendor: 'uniview' } },
+  ).camera;
+  assert.equal(withDefault.vendor, 'uniview', 'the default still applies through a placeholder');
+
+  // A real manufacturer is still honoured.
+  assert.equal(normaliseCamera({ name: 'c', host: '1.2.3.4', vendor: 'Uniview' }).camera.vendor, 'uniview');
 });

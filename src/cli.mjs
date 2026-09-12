@@ -168,7 +168,15 @@ async function cmdProbe(args) {
   print(`\n  ${host} → ${result.status.toUpperCase()}${result.detail ? `\n  ${result.detail}` : ''}\n`);
   for (const [layer, data] of Object.entries(result.layers)) {
     const mark = data.ok ? '✓' : '✗';
-    print(`  ${mark} ${layer.padEnd(9)} ${JSON.stringify(data).slice(0, 220)}`);
+    // --verbose prints the layer in full. Truncating to 220 characters hid the SDP,
+    // the ONVIF response and the vendor JSON - which is the entire reason the
+    // troubleshooting table sends you here when a stream path is wrong.
+    if (args.verbose) {
+      print(`  ${mark} ${layer}`);
+      for (const line of JSON.stringify(data, null, 2).split('\n')) print(`      ${line}`);
+    } else {
+      print(`  ${mark} ${layer.padEnd(9)} ${JSON.stringify(data).slice(0, 220)}`);
+    }
   }
   if (result.warnings.length) {
     print('\n  Warnings:');

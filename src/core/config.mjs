@@ -56,6 +56,11 @@ export const DEFAULTS = {
     rtsp:     { enabled: true,  timeoutMs: 4000, port: 554, method: 'DESCRIBE',
                 pathTemplates: ['/media/video1', '/unicast/c1/s0/live', '/cam/realmonitor?channel=1&subtype=0', '/Streaming/Channels/101'] },
     vendor:   { enabled: true,  timeoutMs: 4000, defaultVendor: 'uniview' },
+    // The camera's own tamper/scene-change analytics. Opt-in PER CAMERA via
+    // `onvifEvents: true` in the inventory: it costs three SOAP round trips per
+    // camera per cycle, which is right for a few high-value cameras and wrong for
+    // a whole fleet.
+    onvifEvents: { enabled: true, timeoutMs: 5000, path: '/onvif/events_service' },
     snapshot: { enabled: true,  timeoutMs: 6000, everyNCycles: 10,
                 blackLumaMax: 18, frozenCycles: 3, minBytes: 2048, blurVarianceMin: 12 },
   },

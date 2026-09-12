@@ -47,6 +47,15 @@ Requires **Node.js 20.11 or newer** on the monitoring PC. No other dependencies 
 no database, no Docker, no native modules, no internet needed to install.
 
 ```powershell
+# One-command setup: checks the environment, writes a starting config,
+# and runs the self-test. Safe to re-run; never overwrites what you have.
+Set-ExecutionPolicy -Scope Process Bypass -Force
+.\scripts\setup.ps1
+```
+
+Then:
+
+```powershell
 # 1. Get your camera list. Easiest route: open AIV-MP, use the old extension's
 #    CSV export, and save it as cameras.csv. Any spreadsheet with an IP column works.
 node src\cli.mjs import --csv cameras.csv
@@ -56,7 +65,8 @@ node src\cli.mjs secret set cameras.username admin
 node src\cli.mjs secret set cameras.password "your-camera-password"
 
 # 3. Check everything before committing to unattended operation
-node src\cli.mjs doctor
+node src\cli.mjs selftest      # proves the pipeline works on THIS machine
+node src\cli.mjs doctor        # checks YOUR configuration and network
 
 # 4. Run it
 node src\cli.mjs run
@@ -406,10 +416,48 @@ unauthenticated page listing every camera's IP is a gift to anyone who finds it.
 
 ---
 
+## Testing it before you trust it
+
+Two different questions, two commands.
+
+**`selftest`** — *does the software work on this machine?* Starts simulated cameras on
+loopback, runs the real engine against them, and verifies every stage: probing, outage
+detection, image analysis, alarm raising, acknowledgement, shelving, report generation
+in all four formats, and delivery. It runs entirely in a scratch directory in a
+separate process, so it cannot touch your real config, inventory or alarm register.
+
+```powershell
+node src\cli.mjs selftest                 # 25 checks, about a second
+node src\cli.mjs selftest --channels      # ALSO sends a real test message
+                                          # through every enabled channel
+node src\cli.mjs selftest --keep          # keep the scratch dir to inspect
+```
+
+This is what to run first on a new PC. It turns "a blocked port, a missing PowerShell
+policy, an expired token, a read-only directory" into a red line on a terminal now,
+instead of a missed alarm at 3am.
+
+**`doctor`** — *is my configuration and network right?* Checks the real installation:
+config validity, inventory, whether the gateway reference hosts answer, channel
+configuration and live health, monitoring freshness, queue depth, disk.
+
+```powershell
+node src\cli.mjs doctor
+```
+
+If something misbehaves, `node src\cli.mjs support` writes a diagnostics bundle —
+configuration with credentials redacted, fleet and alarm state, the delivery queue,
+recent events and the last 200 log lines, with camera addresses masked to their
+subnet. Review it, then share it.
+
+---
+
 ## Commands
 
 ```
 node src\cli.mjs run                            start monitoring + dashboard
+node src\cli.mjs selftest                       prove the pipeline works here
+node src\cli.mjs support                        redacted diagnostics bundle
 node src\cli.mjs import   --csv cameras.csv     import/merge an inventory
 node src\cli.mjs discover --cidr 10.0.0.0/24    find cameras on a subnet
 node src\cli.mjs probe    --host 10.0.0.11      probe one camera, print every layer
@@ -510,7 +558,7 @@ Retention defaults: events 180 days, samples 14 days, logs 30 days.
 ## Testing
 
 ```bash
-npm test        # 163 tests
+npm test        # 167 tests
 ```
 
 The tests run against **real protocol servers**, not mocks: `tests/helpers/fake-camera.mjs`

@@ -73,6 +73,7 @@ const COLUMN_ALIASES = {
   expectedCodec: ['codec', 'expectedcodec'],
   expectedResolution: ['resolution', 'expectedresolution'],
   enabled:   ['enabled', 'active', 'monitor'],
+  onvifEvents: ['onvifevents', 'onvif events', 'tamper', 'analytics'],
   notes:     ['notes', 'note', 'comment', 'remarks'],
 };
 
@@ -182,6 +183,7 @@ export function normaliseCamera(raw, { defaults = {} } = {}) {
   }
 
   rec.enabled = rec.enabled === undefined || rec.enabled === '' ? true : TRUEISH.test(String(rec.enabled));
+  if (rec.onvifEvents !== undefined) rec.onvifEvents = TRUEISH.test(String(rec.onvifEvents));
   rec.vendor = rec.vendor ? slug(rec.vendor) : (defaults.vendor ?? null);
 
   // A bare label like "cam-3" is a legal hostname but almost never resolves on a

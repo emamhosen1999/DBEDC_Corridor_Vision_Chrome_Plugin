@@ -1,5 +1,53 @@
 # Changelog
 
+## 2.2.0 — Deployment, self-test and alarm completeness
+
+### Fixed: nine catalogued alarms had no producer
+
+An audit of the catalogue against the code found **9 of 37 alarm types that nothing
+could ever raise** — a phantom catalogue that documented conditions the system did not
+actually detect. All nine are now wired:
+
+- `SYS_MONITOR_STARTED`, `SYS_COVERAGE_GAP` — raised at startup, with the gap alarm
+  stating the exact window during which nothing was observed.
+- `INV_DEVICE_ADDED`, `INV_DEVICE_REMOVED` — latching alarms, so a camera quietly
+  dropping out of the inventory cannot pass unnoticed.
+- `SLA_DAILY_BREACH`, `SLA_DEVICE_BREACH` — raised from the daily availability check.
+- `ALM_FLOOD` — the alarm system reporting its own overload from live EEMUA metrics.
+- `SEC_ROGUE_DEVICE` — raised when a subnet scan finds a camera answering on the
+  network that is not in the inventory.
+- `VID_TAMPER_ONVIF` — required implementing ONVIF event pull-point subscriptions.
+
+### ONVIF event subscriptions
+
+New opt-in probe layer that asks the camera what *it* thinks is wrong: on-board tamper
+detection, global scene change, too-dark/too-bright and defocus analytics. These fire
+on evidence invisible from outside — someone turning the housing or masking the lens
+between snapshot samples. Opt-in per camera (`onvifEvents` column in the inventory)
+because it costs three SOAP round trips per camera per cycle.
+
+### Self-test
+
+`node src/cli.mjs selftest` starts simulated cameras on loopback, runs the real engine
+against them, and verifies 25 checks across probing, image analysis, alarm lifecycle,
+report rendering in every format, and delivery. Runs in a scratch directory in a
+separate process — it cannot touch the real installation, and a test proves it.
+
+Writing it immediately found two bugs in itself: `paths.mjs` resolves the data root
+once at import, so setting `CORRIDOR_HOME` in an already-running process silently had
+no effect and the first version ran against the real config. Hence the child process.
+
+### Deployment
+
+- `scripts/setup.ps1` — one-command Windows bootstrap: checks Node, prepares and
+  verifies a writable data directory, writes a starting configuration, sets
+  `CORRIDOR_HOME` machine-wide, runs the self-test and prints the next steps.
+- `node src/cli.mjs support` — diagnostics bundle with credentials redacted, secret
+  names only, and camera addresses masked to their subnet.
+
+167 tests (was 163), including one that proves the self-test cannot touch a live
+installation and one that proves the support bundle cannot leak a stored credential.
+
 ## 2.1.0 — Industry-standard alarm management and periodic reporting
 
 Adds a real alarm system in place of a notification stream, and a scheduled

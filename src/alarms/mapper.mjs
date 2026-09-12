@@ -34,6 +34,7 @@ const FINDING_TO_TAG = {
   IMAGE_FLAT: 'VID_TAMPER_COVERED',
   IMAGE_WASHED_OUT: 'VID_WASHED_OUT',
   STREAM_FAIL: 'VID_STREAM_FAIL',
+  ONVIF_TAMPER: 'VID_TAMPER_ONVIF',
 };
 
 /** Latching findings become events rather than conditions — they do not "clear". */

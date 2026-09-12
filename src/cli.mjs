@@ -28,6 +28,7 @@ import { loadState, diskPressure } from './core/store.mjs';
 import { stats as queueStats } from './alerts/queue.mjs';
 import { fmtDuration } from './core/time.mjs';
 import fs from 'node:fs';
+import path from 'node:path';
 
 const logger = log('cli');
 
@@ -332,6 +333,102 @@ async function cmdReports(args) {
   print(Array.isArray(body) ? body.join('\n') : body);
 }
 
+/* ------------------------------------------------------------ selftest --- */
+
+async function cmdSelfTest(args) {
+  const { runSelfTest } = await import('./selftest/index.mjs');
+  // The real config is only loaded when asked to send through live channels; the rest
+  // of the self-test runs entirely in a scratch directory and touches nothing.
+  let realConfig = null;
+  if (args.channels) {
+    try { realConfig = loadConfig(); }
+    catch (err) { print(`Cannot test live channels: ${err.message}`); process.exitCode = 1; return; }
+  }
+  const result = await runSelfTest({ channels: !!args.channels, keepHome: !!args.keep, realConfig });
+  if (!result.ok) process.exitCode = 1;
+}
+
+/* ------------------------------------------------------ support bundle --- */
+
+async function cmdSupport(args) {
+  const fsp = await import('node:fs/promises');
+  const { DIRS } = await import('./core/paths.mjs');
+  const { redact } = await import('./core/secrets.mjs');
+  const { listSecrets } = await import('./core/secrets.mjs');
+  configureLogger({ level: 'error', file: false });
+
+  // Everything a diagnosis needs, and nothing that would leak a credential.
+  const bundle = { generatedAt: new Date().toISOString(), version: 2 };
+  bundle.host = {
+    platform: process.platform, arch: process.arch, node: process.version,
+    uptimeSec: Math.round(process.uptime()), cwd: process.cwd(), home: DIRS.root,
+  };
+
+  try {
+    const cfg = loadConfig();
+    bundle.config = redact(cfg);
+    delete bundle.config.__warnings;
+    bundle.configWarnings = cfg.__warnings ?? [];
+  } catch (err) { bundle.configError = err.message; }
+
+  bundle.secretsStored = listSecrets();          // NAMES ONLY, never values
+
+  try {
+    const state = await loadState();
+    bundle.fleet = state.fleet;
+    bundle.cycle = state.cycle;
+    bundle.network = state.network;
+    bundle.reporting = state.reporting;
+    bundle.cameraCount = Object.keys(state.cameras ?? {}).length;
+    // Per-camera states, with addresses masked: the last octet is enough to correlate
+    // without publishing the corridor's address plan into a chat window.
+    bundle.cameras = Object.entries(state.cameras ?? {}).map(([id, c]) => ({
+      id, name: c.name, group: c.group,
+      host: String(c.host ?? '').replace(/\.\d+$/, '.x'),
+      status: c.status, since: c.since, flapping: c.flapping,
+      reason: c.lastReason, detail: c.lastDetail, warnings: c.warnings,
+    }));
+    bundle.alarms = Object.values(state.alarms ?? {}).map((a) => ({
+      tag: a.tag, subject: a.subjectName, group: a.subjectGroup, state: a.state,
+      raisedAt: a.raisedAt, occurrences: a.occurrences, detail: a.detail,
+    }));
+  } catch (err) { bundle.stateError = err.message; }
+
+  try {
+    const { stats } = await import('./alerts/queue.mjs');
+    const q = await stats();
+    bundle.queue = { pending: q.pending, byChannel: q.byChannel, history: q.history.slice(0, 40) };
+  } catch (err) { bundle.queueError = err.message; }
+
+  try {
+    const events = await readEventsForSupport(Number(args.hours) || 24);
+    bundle.recentEvents = events;
+  } catch (err) { bundle.eventsError = err.message; }
+
+  try {
+    const files = (await fsp.readdir(DIRS.logs)).filter((f) => f.endsWith('.log')).sort().reverse().slice(0, 2);
+    bundle.logTail = {};
+    for (const f of files) {
+      const text = await fsp.readFile(path.join(DIRS.logs, f), 'utf8');
+      bundle.logTail[f] = text.split('\n').slice(-200).join('\n');
+    }
+  } catch { bundle.logTail = {}; }
+
+  const out = args.out ?? path.join(DIRS.exports, `support-bundle-${Date.now()}.json`);
+  await fsp.mkdir(path.dirname(out), { recursive: true });
+  await fsp.writeFile(out, JSON.stringify(bundle, null, 2));
+  print(`\nSupport bundle written to:\n  ${out}\n`);
+  print('It contains configuration (credentials redacted), fleet and alarm state,');
+  print('the delivery queue, recent events and the last 200 log lines.');
+  print('Camera addresses are masked to their subnet. Review it before sharing.');
+}
+
+async function readEventsForSupport(hours) {
+  const { readEvents } = await import('./core/store.mjs');
+  const events = await readEvents({ sinceTs: Date.now() - hours * 3_600_000, limit: 400 });
+  return events.map((e) => ({ ...e, host: e.host ? String(e.host).replace(/\.\d+$/, '.x') : undefined }));
+}
+
 /* -------------------------------------------------------------- doctor --- */
 
 async function cmdDoctor() {
@@ -477,6 +574,8 @@ const COMMANDS = {
   'test-alert': cmdTestAlert,
   report: cmdReport,
   doctor: cmdDoctor,
+  selftest: cmdSelfTest,
+  support: cmdSupport,
   alarms: cmdAlarms,
   reports: cmdReports,
   'wa-login': cmdWaLogin,

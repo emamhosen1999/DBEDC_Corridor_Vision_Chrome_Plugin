@@ -24,6 +24,7 @@ import { tcpLadder } from './tcp.mjs';
 import { onvifAlive, onvifDeviceInfo } from './onvif.mjs';
 import { rtspProbe } from './rtsp.mjs';
 import { snapshotProbe } from './snapshot.mjs';
+import { pullOnvifEvents } from './onvif-events.mjs';
 import { getAdapter, detectVendor } from './vendor/index.mjs';
 import { withTimeout } from '../core/pool.mjs';
 
@@ -204,6 +205,23 @@ export async function probeCamera(camera, cfg, ctx = {}) {
           'washed-out': 'IMAGE_WASHED_OUT', tiny: 'IMAGE_INVALID',
         }[layers.snapshot.verdict] ?? 'IMAGE_DEGRADED';
         finding(code, `image ${layers.snapshot.verdict}${measured}`, layers.snapshot.meanLuma ?? null);
+      }
+    }
+
+    /* ---- Layer 6: the camera's own analytics (opt-in) ----------------------- */
+    if (p.onvifEvents?.enabled && camera.onvifEvents && hostAlive) {
+      layers.events = await pullOnvifEvents(camera.host, {
+        port: camera.onvifPort ?? p.onvif.port,
+        path: camera.onvifEventsPath ?? p.onvifEvents.path,
+        username: camera.httpUser ?? username,
+        password: camera.httpPass ?? password,
+        timeoutMs: p.onvifEvents.timeoutMs,
+      });
+      for (const ev of layers.events.events ?? []) {
+        if (!ev.active) continue;
+        const code = { tamper: 'ONVIF_TAMPER', 'too-dark': 'IMAGE_BLACK', 'too-bright': 'IMAGE_WASHED_OUT',
+          defocus: 'IMAGE_FLAT', 'signal-loss': 'STREAM_FAIL' }[ev.kind];
+        if (code) finding(code, `${ev.detail} (${ev.topic})`, ev.topic);
       }
     }
 

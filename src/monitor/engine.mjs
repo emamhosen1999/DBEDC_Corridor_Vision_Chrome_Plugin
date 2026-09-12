@@ -24,7 +24,7 @@ import { mapPool, singleFlight, withTimeout } from '../core/pool.mjs';
 import { loadState, updateState, appendSample, prune, diskPressure } from '../core/store.mjs';
 import { FILES } from '../core/paths.mjs';
 import { probeCameraBounded, checkNetwork, STATUS } from '../probe/index.mjs';
-import { evaluateCycle, detectMassOutage, summariseFleet } from './detector.mjs';
+import { evaluateCycle, detectMassOutage, summariseFleet, TRANSITION } from './detector.mjs';
 import { activeCameras } from './inventory.mjs';
 import { cameraAvailability, fleetTrend, dailyAvailability } from './metrics.mjs';
 import { AlertBus } from '../alerts/bus.mjs';
@@ -81,6 +81,13 @@ export class Engine extends EventEmitter {
           type: 'monitor.recovered', at: Date.now(),
           gapMs, gapFrom: lastFinished, gapTo: Date.now(),
         }], { immediate: true });
+        // Also a catalogued alarm, so the gap has an acknowledgement lifecycle and
+        // appears in the report — a notification about it would just scroll away.
+        this.register?.raiseEvent('SYS_COVERAGE_GAP', { id: null, name: this.cfg.site.name }, {
+          detail: `Monitoring was not running from ${new Date(lastFinished).toISOString()} to ${new Date().toISOString()} `
+            + `(${Math.round(gapMs / 60_000)} minutes). Camera state during that window was never observed.`,
+          value: gapMs,
+        });
       }
     }
 
@@ -90,6 +97,11 @@ export class Engine extends EventEmitter {
       type: 'monitor.started', at: Date.now(),
       cameras: cameras.length, intervalSec: this.cfg.monitor.intervalSec,
     }]);
+    this.register?.raiseEvent('SYS_MONITOR_STARTED', { id: null, name: this.cfg.site.name }, {
+      detail: `Monitoring ${cameras.length} cameras every ${this.cfg.monitor.intervalSec}s.`,
+      value: cameras.length,
+    });
+    await this.#publishAlarms();
 
     logger.info('engine started', {
       cameras: cameras.length,
@@ -251,6 +263,18 @@ export class Engine extends EventEmitter {
         this.register.assert(g.tag, g.present, g.subject, g.evidence, now);
       }
 
+      // Inventory changes are latching events: a camera quietly dropping out of the
+      // inventory means it stops being watched, and that must not pass unnoticed.
+      for (const t of transitions) {
+        if (t.type === TRANSITION.ADDED) {
+          this.register.raiseEvent('INV_DEVICE_ADDED', { id: t.cameraId, name: t.name, group: t.group },
+            { detail: `${t.name} (${t.host}) was added to monitoring.` }, now);
+        } else if (t.type === TRANSITION.REMOVED) {
+          this.register.raiseEvent('INV_DEVICE_REMOVED', { id: t.cameraId, name: t.name, group: t.group },
+            { detail: `${t.name} (${t.host}) is no longer in the inventory and is no longer being monitored.` }, now);
+        }
+      }
+
       // Alarm-system self-monitoring: shelf expiries, chattering, standing alarms.
       for (const d of this.register.sweep(now)) {
         this.register.assert(d.tag, true, d.subject, { detail: d.detail }, now);
@@ -397,7 +421,22 @@ export class Engine extends EventEmitter {
             type: 'sla.breach', at: now, uptimePct, targetPct: sla.dailyUptimePct,
             worst: rows.filter((r) => r.uptimePct < 100).slice(0, 10),
           }]);
+          this.register?.raiseEvent('SLA_DAILY_BREACH', { id: null, name: this.cfg.site.name }, {
+            detail: `Fleet availability for ${today} was ${uptimePct}%, below the ${sla.dailyUptimePct}% target.`,
+            value: uptimePct,
+          }, now);
         }
+        // Per-device breaches: a camera failing repeatedly in short bursts is usually
+        // about to fail permanently, and is cheaper to replace than to keep visiting.
+        const deviceTarget = sla.deviceUptimePct ?? sla.dailyUptimePct;
+        for (const r of rows) {
+          if (r.uptimePct >= deviceTarget || r.outages === 0) continue;
+          this.register?.raiseEvent('SLA_DEVICE_BREACH', { id: r.cameraId, name: r.name, group: r.group }, {
+            detail: `${r.name} was available ${r.uptimePct}% over 24 hours across ${r.outages} outage(s), below the ${deviceTarget}% target.`,
+            value: r.uptimePct,
+          }, now);
+        }
+        await this.#publishAlarms();
       }
     }
 
@@ -416,6 +455,23 @@ export class Engine extends EventEmitter {
       } else if (!state.reporting?.nextDueAt && due) {
         await updateState((s) => { s.reporting = { ...(s.reporting ?? {}), nextDueAt: due.dueAt }; });
       }
+    }
+
+    /* Alarm flood — the alarm system reporting on its own health */
+    if (this.cfg.alarms?.enabled !== false && this.register) {
+      try {
+        const k = await alarmKpis({
+          sinceTs: now - 3_600_000, untilTs: now, register: this.register,
+          operatorPositions: this.cfg.alarms?.operatorPositions ?? 1,
+        });
+        const flooding = k.peak.value > (this.cfg.alarms?.floodPer10Min ?? 10);
+        this.register.assert('ALM_FLOOD', flooding, { id: null, name: this.cfg.site.name }, flooding ? {
+          detail: `${k.peak.value} alarms were raised in a ten-minute period (flood threshold ${this.cfg.alarms?.floodPer10Min ?? 10}). `
+            + 'Look for the common cause first — a flood is nearly always one fault, not many.',
+          value: k.peak.value,
+        } : {}, now);
+        await this.#publishAlarms();
+      } catch (err) { logger.error('flood check failed', { error: err.message }); }
     }
 
     /* Retention + disk pressure */

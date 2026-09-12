@@ -88,10 +88,25 @@ export function buildApi({ cfg, engine, server }) {
     'POST /api/inventory/discover': async (_url, body) => {
       if (!body?.cidr) return bad('provide { "cidr": "192.168.10.0/24" }');
       try {
-        return ok(await discoverSubnet(body.cidr, {
+        const out = await discoverSubnet(body.cidr, {
           ports: body.ports, concurrency: body.concurrency, timeoutMs: body.timeoutMs,
           username: body.username, password: body.password,
-        }));
+        });
+        // A camera answering on the network that nobody is monitoring is a coverage
+        // blind spot — or a device that should not be on a camera VLAN at all.
+        const inventory = await loadInventory();
+        const known = new Set(inventory.cameras.map((c) => c.host));
+        const unknown = out.cameras.filter((c) => !known.has(c.host));
+        for (const u of unknown) {
+          engine.register?.raiseEvent('SEC_ROGUE_DEVICE', { id: `rogue:${u.host}`, name: u.name ?? u.host }, {
+            detail: `${u.host} answered on camera ports (${u.openPorts.join(', ') || 'ONVIF'})`
+              + `${u.manufacturer ? `, identifying as ${u.manufacturer} ${u.model ?? ''}`.trim() : ''}`
+              + ' but is not in the inventory.',
+            value: u.host,
+          });
+        }
+        if (unknown.length) await engine.persistAlarms();
+        return ok({ ...out, unregistered: unknown });
       } catch (err) { return bad(err.message); }
     },
 

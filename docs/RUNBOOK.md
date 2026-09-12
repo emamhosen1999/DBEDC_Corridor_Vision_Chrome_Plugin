@@ -223,12 +223,30 @@ deliberate and should not be changed.
 
 ---
 
+## Proving the system still works
+
+`selftest` runs the whole pipeline against simulated cameras. It touches nothing real,
+takes about a second, and is the fastest way to answer "is the software broken, or is
+the network broken?"
+
+```powershell
+node src\cli.mjs selftest
+```
+
+Worth running after any Windows update, any change to the PC, or whenever alarms seem
+to have gone quiet. If `selftest` passes and cameras still read as down, the problem is
+the network or the cameras — not this software.
+
+---
+
 ## Commands you may be asked to run
 
 Always from the Corridor Vision folder on the monitoring PC.
 
 ```powershell
-node src\cli.mjs doctor                       # full health check
+node src\cli.mjs selftest                     # does the software work here?
+node src\cli.mjs doctor                       # is the config and network right?
+node src\cli.mjs support                      # diagnostics bundle to send on
 node src\cli.mjs probe --host 192.168.10.11   # test one camera, every layer
 node src\cli.mjs report --format offline      # print the offline list
 node src\cli.mjs test-alert --channel telegram

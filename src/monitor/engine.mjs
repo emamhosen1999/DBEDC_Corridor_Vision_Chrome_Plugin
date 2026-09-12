@@ -203,7 +203,10 @@ export class Engine extends EventEmitter {
       mapPool(cameras, this.cfg.monitor.concurrency, (camera) => probeCameraBounded(camera, this.cfg, {
         cycle: this.cycleCount,
         credentials,
-        history: { snapshot: prevState.cameras[camera.id]?.snapshot ?? {} },
+        history: {
+          snapshot: prevState.cameras[camera.id]?.snapshot ?? {},
+          stream: prevState.cameras[camera.id]?.stream ?? {},
+        },
       })),
       this.cfg.monitor.cycleTimeoutMs,
       'monitoring cycle',

@@ -357,15 +357,26 @@ export function migrate(raw) {
 
 let cached = null;
 
+/**
+ * Read a JSON file, tolerating a UTF-8 BOM.
+ *
+ * Notepad, `Set-Content -Encoding UTF8` on Windows PowerShell 5.1, and most Windows
+ * editors prepend U+FEFF. `JSON.parse` rejects it, so a config edited on the very
+ * platform this runs on would refuse to load. Strip it rather than bricking the
+ * service over an invisible character.
+ */
+export function readJsonFile(file) {
+  return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^﻿/, ''));
+}
+
 /** Load, migrate, merge over defaults and validate. Throws on validation errors. */
 export function loadConfig({ force = false } = {}) {
   if (cached && !force) return cached;
   ensureDirs();
   let onDisk = {};
   if (fs.existsSync(FILES.config)) {
-    const text = fs.readFileSync(FILES.config, 'utf8');
     try {
-      onDisk = JSON.parse(text);
+      onDisk = readJsonFile(FILES.config);
     } catch (err) {
       throw new Error(`config/config.json is not valid JSON: ${err.message}`);
     }
@@ -383,7 +394,7 @@ export function loadConfig({ force = false } = {}) {
 /** Persist a patch to config.json (validated before it is written). */
 export function saveConfig(patch) {
   ensureDirs();
-  const current = fs.existsSync(FILES.config) ? JSON.parse(fs.readFileSync(FILES.config, 'utf8')) : {};
+  const current = fs.existsSync(FILES.config) ? readJsonFile(FILES.config) : {};
   const next = deepMerge(current, patch);
   const merged = deepMerge(DEFAULTS, migrate(next));
   const { errors } = validate(merged);

@@ -177,7 +177,11 @@ export async function readSamples({ sinceTs = Date.now() - 86_400_000, untilTs =
 
 export async function loadInventory() {
   try {
-    return JSON.parse(await fsp.readFile(FILES.inventory, 'utf8'));
+    // Strip a UTF-8 BOM: inventory.json is routinely hand-edited on Windows, where
+    // Notepad and PowerShell 5.1 both prepend one. Without this, a BOM would be
+    // indistinguishable from a corrupt file and the whole fleet would read as empty.
+    const text = (await fsp.readFile(FILES.inventory, 'utf8')).replace(/^﻿/, '');
+    return JSON.parse(text);
   } catch (err) {
     if (err.code !== 'ENOENT') logger.error('inventory unreadable', { error: err.message });
     return { version: 2, updatedAt: 0, cameras: [] };

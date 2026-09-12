@@ -59,6 +59,7 @@ function emptyCameraState(now) {
     lastDetail: null,
     warnings: [],
     snapshot: {},          // dHash/frozenCount carried between cycles
+    stream: {},            // RTSP URL learned from the camera over ONVIF, cached here
     totals: { downCount: 0, downMs: 0 },
   };
 }
@@ -99,6 +100,9 @@ export function evaluateCycle({ prevStates = {}, results = [], cfg, now = Date.n
 
     // Carry snapshot history forward so frozen-frame detection spans cycles.
     if (result.layers?.snapshot?.history) state.snapshot = result.layers.snapshot.history;
+    // Carry the stream path the camera told us about, so ONVIF discovery runs once
+    // rather than every cycle. An empty object clears a path that stopped working.
+    if (result.layers?.rtsp?.discovered) state.stream = result.layers.rtsp.discovered;
     state.warnings = result.warnings ?? [];
     state.lastProbeAt = result.at;
     state.latencyMs = result.latencyMs ?? null;

@@ -12,7 +12,9 @@
       Set-ExecutionPolicy -Scope Process Bypass -Force
       .\scripts\setup.ps1
 
-  Elevation is only needed later, for install-task.ps1.
+  Elevation is not required. Run elevated only if you want CORRIDOR_HOME persisted
+  machine-wide now rather than by install-task.ps1 later; unelevated, setup falls
+  back to the user scope and says so.
 
 .PARAMETER DataHome
   Where config, data and logs live. Defaults to the repository folder. Put this on a
@@ -98,19 +100,48 @@ if (Test-Path $cfgPath) {
 } else {
   $example = Join-Path $repo "config\config.example.json"
   if (-not (Test-Path $example)) { Bad "config.example.json is missing from the repository."; exit 1 }
-  $cfg = Get-Content $example -Raw | ConvertFrom-Json
+  # Read as UTF-8 explicitly. Windows PowerShell 5.1 defaults to the ANSI codepage,
+  # which turns every em-dash in the example into mojibake.
+  $raw = [System.IO.File]::ReadAllText($example, [System.Text.UTF8Encoding]::new($false))
+  $cfg = $raw | ConvertFrom-Json
   $cfg.site.name = $SiteName
   $cfg.site.timezone = $TimeZone
   $cfg.server.port = $Port
   # Start with a quiet, safe default: probing on, nothing leaving the PC until the
   # operator deliberately enables a channel and tests it.
-  $cfg | ConvertTo-Json -Depth 12 | Set-Content -Path $cfgPath -Encoding UTF8
+  $json = $cfg | ConvertTo-Json -Depth 32
+  # Write UTF-8 WITHOUT a BOM. `Set-Content -Encoding UTF8` on PowerShell 5.1 emits
+  # one, and JSON.parse rejects a leading U+FEFF - the config would be unloadable.
+  [System.IO.File]::WriteAllText($cfgPath, $json, [System.Text.UTF8Encoding]::new($false))
   Ok "Created config\config.json for '$SiteName' ($TimeZone), dashboard port $Port"
 }
 
 $env:CORRIDOR_HOME = $DataHome
-[Environment]::SetEnvironmentVariable("CORRIDOR_HOME", $DataHome, "Machine")
-Ok "CORRIDOR_HOME set machine-wide to $DataHome"
+# Machine scope writes HKLM and therefore needs elevation. Setup is documented as
+# runnable unelevated, so fall back to the user scope rather than aborting - and say
+# which one was used, because a SYSTEM scheduled task only reads the machine scope.
+$scope = $null
+try {
+  [Environment]::SetEnvironmentVariable("CORRIDOR_HOME", $DataHome, "Machine")
+  $scope = "Machine"
+} catch {
+  try {
+    [Environment]::SetEnvironmentVariable("CORRIDOR_HOME", $DataHome, "User")
+    $scope = "User"
+  } catch {
+    $scope = $null
+  }
+}
+if ($scope -eq "Machine") {
+  Ok "CORRIDOR_HOME set machine-wide to $DataHome"
+} elseif ($scope -eq "User") {
+  Ok "CORRIDOR_HOME set for this user to $DataHome"
+  Warn "Machine scope needs elevation. install-task.ps1 runs elevated and will set it"
+  Warn "machine-wide; until then a SYSTEM-scheduled service would not see this value."
+} else {
+  Warn "Could not persist CORRIDOR_HOME. It is set for this session only."
+  Warn "install-task.ps1 (elevated) will set it machine-wide."
+}
 
 # ------------------------------------------------------------- self-test ----
 if (-not $SkipSelfTest) {

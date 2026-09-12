@@ -150,3 +150,73 @@ test('TCP distinguishes a refused port from an unreachable host', async () => {
   const gone = await tcpLadder('192.0.2.99', [554], 900);
   assert.equal(gone.hostAlive, false);
 });
+
+/* ------------------------- ONVIF stream-URI discovery (commissioning DBEDC) --- */
+
+// The pathTemplates in config are guesses written from vendor documentation. On real
+// hardware they are routinely wrong, and a wrong guess reported a healthy camera as
+// "no-such-stream" - a false DEGRADED on every camera in the fleet. The camera can be
+// asked directly over ONVIF, so it is.
+const UNGUESSABLE = '/cam/realmonitor/ch01/main/av_stream_7734';
+
+test('a stream path no template would guess is discovered over ONVIF', async (t) => {
+  const cam = await startFakeCamera({ requireAuth: false, rtspPath: UNGUESSABLE });
+  t.after(() => cam.stop());
+
+  const c = cfg({
+    probe: {
+      tcp: { ports: [cam.rtspPort, cam.httpPort] },
+      onvif: { port: cam.httpPort },
+      rtsp: { port: cam.rtspPort, pathTemplates: ['/media/video1', '/Streaming/Channels/101'] },
+    },
+  });
+  const camera = { id: 'c1', name: 'K04+600 East', host: '127.0.0.1', onvifPort: cam.httpPort, rtspPort: cam.rtspPort };
+
+  const r = await probeCamera(camera, c, { cycle: 1 });
+  assert.equal(r.layers.rtsp.ok, true, `every template missed and ONVIF was not consulted: ${r.layers.rtsp.reason}`);
+  assert.equal(r.layers.rtsp.via, 'onvif-getstreamuri');
+  assert.equal(r.status, STATUS.UP, 'a camera serving video must not read as degraded');
+  assert.match(r.layers.rtsp.discovered.url, new RegExp(`${UNGUESSABLE}$`));
+});
+
+test('the discovered path is reused on later cycles instead of re-asking ONVIF', async (t) => {
+  const cam = await startFakeCamera({ requireAuth: false, rtspPath: UNGUESSABLE });
+  t.after(() => cam.stop());
+  const c = cfg({
+    probe: {
+      tcp: { ports: [cam.rtspPort, cam.httpPort] },
+      onvif: { port: cam.httpPort },
+      rtsp: { port: cam.rtspPort, pathTemplates: ['/media/video1'] },
+    },
+  });
+  const camera = { id: 'c1', name: 'K04+600 East', host: '127.0.0.1', onvifPort: cam.httpPort, rtspPort: cam.rtspPort };
+
+  const first = await probeCamera(camera, c, { cycle: 1 });
+  const learned = first.layers.rtsp.discovered.url;
+
+  // Second cycle: the learned URL is handed back as history and must work directly,
+  // with no ONVIF round trip (which is what `via` being absent tells us).
+  const second = await probeCamera(camera, c, { cycle: 2, history: { stream: { url: learned } } });
+  assert.equal(second.layers.rtsp.ok, true);
+  assert.equal(second.layers.rtsp.via, undefined, 'ONVIF should not be consulted again');
+  assert.equal(second.status, STATUS.UP);
+});
+
+test('a camera that really has no stream is still reported as degraded', async (t) => {
+  // Discovery must not paper over a genuine fault: ONVIF answers, RTSP still refuses.
+  const cam = await startFakeCamera({ requireAuth: false, behaviour: 'rtsp-dead' });
+  t.after(() => cam.stop());
+  const c = cfg({
+    probe: {
+      tcp: { ports: [cam.rtspPort, cam.httpPort] },
+      onvif: { port: cam.httpPort },
+      rtsp: { port: cam.rtspPort, pathTemplates: ['/media/video1'] },
+    },
+  });
+  const r = await probeCamera(
+    { id: 'c2', name: 'Wedged encoder', host: '127.0.0.1', onvifPort: cam.httpPort, rtspPort: cam.rtspPort },
+    c, { cycle: 1 },
+  );
+  assert.equal(r.layers.rtsp.ok, false);
+  assert.equal(r.status, STATUS.DEGRADED, 'reachable but not serving video');
+});

@@ -21,7 +21,7 @@
  */
 import { icmpProbe } from './icmp.mjs';
 import { tcpLadder } from './tcp.mjs';
-import { onvifAlive, onvifDeviceInfo } from './onvif.mjs';
+import { onvifAlive, onvifDeviceInfo, onvifStreamUri } from './onvif.mjs';
 import { rtspProbe } from './rtsp.mjs';
 import { snapshotProbe } from './snapshot.mjs';
 import { pullOnvifEvents } from './onvif-events.mjs';
@@ -126,15 +126,46 @@ export async function probeCamera(camera, cfg, ctx = {}) {
     /* ---- Layer 3: RTSP DESCRIBE (does the video actually serve?) ------------- */
     let streamOk = null;
     if (p.rtsp.enabled && hostAlive) {
-      layers.rtsp = await rtspProbe(camera.host, {
+      const rtspOpts = {
         port: camera.rtspPort ?? p.rtsp.port,
-        paths: rtspPaths(camera, cfg),
-        explicitUrl: camera.rtspUrl ?? null,
         username: camera.rtspUser ?? username,
         password: camera.rtspPass ?? password,
         timeoutMs: p.rtsp.timeoutMs,
         method: p.rtsp.method,
+      };
+      // A path learned from the camera on an earlier cycle outranks any guess.
+      const learned = ctx.history?.stream?.url ?? null;
+      layers.rtsp = await rtspProbe(camera.host, {
+        ...rtspOpts,
+        paths: rtspPaths(camera, cfg),
+        explicitUrl: camera.rtspUrl ?? learned ?? null,
       });
+
+      // The template list is a guess written from documentation. When every guess
+      // misses, ASK the camera over ONVIF rather than reporting a working camera as
+      // a dead stream - `no-such-stream` against a healthy encoder is a false alarm,
+      // and a false alarm on 162 cameras is how an operator learns to ignore this.
+      // The answer is cached on the camera's state, so this costs two SOAP calls
+      // once, not every cycle.
+      const guessMissed = !layers.rtsp.ok
+        && layers.rtsp.reason !== 'auth'
+        && !camera.rtspUrl
+        && p.onvif.enabled;
+      if (guessMissed) {
+        const discovered = await onvifStreamUri(camera.host, {
+          port: camera.onvifPort ?? p.onvif.port,
+          username, password, timeoutMs: p.onvif.timeoutMs,
+        }).catch(() => ({ ok: false }));
+        if (discovered.ok && discovered.uri && discovered.uri !== learned) {
+          const retry = await rtspProbe(camera.host, { ...rtspOpts, paths: [], explicitUrl: discovered.uri });
+          if (retry.ok) {
+            layers.rtsp = { ...retry, via: 'onvif-getstreamuri', discovered: { url: discovered.uri, at: Date.now() } };
+          }
+        } else if (learned) {
+          // A cached path that no longer works must not be retried forever.
+          layers.rtsp.discovered = {};
+        }
+      }
       streamOk = layers.rtsp.ok;
       if (layers.rtsp.hostAlive) hostAlive = true;
       if (layers.rtsp.ok) {

@@ -10,3 +10,8 @@ config/vault.key
 Thumbs.db
 coverage/
 *.tmp
+
+# Operator camera inventory exports: real device addresses, not for git
+cameras.csv
+*.cameras.csv
+Camera*Information*.csv

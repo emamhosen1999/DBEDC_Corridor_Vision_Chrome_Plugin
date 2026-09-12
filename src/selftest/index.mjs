@@ -356,7 +356,22 @@ export async function runSelfTest({ channels = false, keepHome = false } = {}) {
         CORRIDOR_REAL_HOME: process.env.CORRIDOR_HOME ?? '',
       },
     });
-    child.on('exit', (c) => resolve(c ?? 1));
+    // Report HOW the child died. `c ?? 1` alone collapsed a crash, a kill and a
+    // failed check into the same bare exit 1 with nothing on screen, which is exactly
+    // the kind of silent failure this tool exists to prevent.
+    child.on('exit', (c, signal) => {
+      if (c === null || c === undefined) {
+        process.stderr.write(
+          `\nself-test child was terminated by ${signal ?? 'an unknown signal'} before `
+          + 'it could report a result.\nRe-run, and if it repeats capture the output:\n'
+          + '  node src\cli.mjs selftest > selftest.log 2>&1\n');
+      } else if (c !== 0 && c !== 1) {
+        process.stderr.write(
+          `\nself-test child exited abnormally with code ${c} — that is a crash, not a `
+          + 'failed check.\n');
+      }
+      resolve(c ?? 1);
+    });
     child.on('error', (err) => {
       process.stderr.write(`self-test could not start: ${err.message}\n`);
       resolve(1);
@@ -391,5 +406,11 @@ if (process.argv[2] === '--child') {
     }
   }
   const result = await execute({ channels: wantChannels, home, realConfig });
+  // `process.exit()` discards anything still buffered in stdout. On Windows a pipe
+  // (which is what stdout is whenever the output is captured rather than a console)
+  // is written asynchronously, so exiting here truncated the verdict — a FAILING
+  // self-test printed its checks and then died with no reason shown at all. Wait for
+  // the stream to drain before setting the exit status.
+  await new Promise((resolve) => process.stdout.write('', resolve));
   process.exit(result.ok ? 0 : 1);
 }

@@ -11,7 +11,7 @@ const md5 = (s) => crypto.createHash('md5').update(s).digest('hex');
 
 export async function startFakeCamera({
   rtspPort = 0, httpPort = 0, username = 'admin', password = 'secret',
-  requireAuth = true, rtspPath = '/media/video1', jpeg = null,
+  requireAuth = true, rtspPath = '/media/video1', jpeg = null, mediaService = true,
   behaviour = 'healthy',    // healthy | rtsp-dead | silent | slow
 } = {}) {
   const nonce = 'deadbeefcafe';
@@ -93,6 +93,23 @@ export async function startFakeCamera({
         return send(200, `<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body>
 <tds:GetDeviceInformationResponse xmlns:tds="x"><tds:Manufacturer>Uniview</tds:Manufacturer><tds:Model>IPC2324SR5</tds:Model>
 <tds:FirmwareVersion>V1.2.3</tds:FirmwareVersion><tds:SerialNumber>SN12345</tds:SerialNumber></tds:GetDeviceInformationResponse></s:Body></s:Envelope>`);
+      }
+      return send(400, '<fault/>');
+    }
+    // ONVIF Media service: how a camera is asked for its REAL stream URL, rather
+    // than being guessed at from a list of vendor path templates.
+    if (req.url.includes('media_service')) {
+      if (!mediaService) return send(404, 'not found', 'text/plain');
+      const body = await new Promise((r) => { let b = ''; req.on('data', (c) => { b += c; }); req.on('end', () => r(b)); });
+      if (/GetProfiles/.test(body)) {
+        return send(200, `<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body>
+<trt:GetProfilesResponse xmlns:trt="z"><trt:Profiles token="Profile_1" fixed="true"><tt:Name xmlns:tt="y">mainstream</tt:Name></trt:Profiles>
+</trt:GetProfilesResponse></s:Body></s:Envelope>`);
+      }
+      if (/GetStreamUri/.test(body)) {
+        return send(200, `<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body>
+<trt:GetStreamUriResponse xmlns:trt="z"><trt:MediaUri><tt:Uri xmlns:tt="y">rtsp://127.0.0.1:${rtsp.address().port}${rtspPath}</tt:Uri>
+</trt:MediaUri></trt:GetStreamUriResponse></s:Body></s:Envelope>`);
       }
       return send(400, '<fault/>');
     }

@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Corridor Vision</title>
+<link rel="stylesheet" href="app.css" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230f172a'/%3E%3Ccircle cx='16' cy='16' r='7' fill='none' stroke='%2338bdf8' stroke-width='2.5'/%3E%3Ccircle cx='16' cy='16' r='2.5' fill='%2338bdf8'/%3E%3C/svg%3E" />
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo" aria-hidden="true"></span>
+    <div>
+      <h1 id="site-name">Corridor Vision</h1>
+      <p class="sub" id="site-sub">connecting…</p>
+    </div>
+  </div>
+  <div class="live" id="live-wrap">
+    <span class="dot" id="live-dot"></span>
+    <span id="live-text">connecting</span>
+  </div>
+  <div class="actions">
+    <button id="btn-notify" class="btn ghost" title="Allow browser notifications for alerts">🔔 Notify</button>
+    <button id="btn-refresh" class="btn">↻ Probe now</button>
+    <button id="btn-report" class="btn primary">⧉ Report</button>
+  </div>
+</header>
+
+<div id="stale-banner" class="banner critical" hidden>
+  <strong>Monitoring is stale.</strong>
+  <span id="stale-detail"></span>
+</div>
+<div id="network-banner" class="banner warn" hidden>
+  <strong>Monitoring network path is down.</strong>
+  Camera states are being reported as <em>unknown</em>, not offline, until it recovers.
+</div>
+
+<nav class="tabs" role="tablist">
+  <button class="tab active" role="tab" aria-selected="true" data-view="overview">Overview</button>
+  <button class="tab" role="tab" aria-selected="false" data-view="cameras">Cameras</button>
+  <button class="tab" role="tab" aria-selected="false" data-view="alarms">Alarms <span class="tab-badge" id="alarm-badge" hidden>0</span></button>
+  <button class="tab" role="tab" aria-selected="false" data-view="reports">Reports</button>
+  <button class="tab" role="tab" aria-selected="false" data-view="timeline">Timeline</button>
+  <button class="tab" role="tab" aria-selected="false" data-view="uptime">Uptime</button>
+  <button class="tab" role="tab" aria-selected="false" data-view="alerts">Alerts</button>
+  <button class="tab" role="tab" aria-selected="false" data-view="settings">Settings</button>
+</nav>
+
+<main>
+  <!-- ============================ OVERVIEW ============================ -->
+  <section id="view-overview" class="view">
+    <div class="tiles">
+      <div class="tile"><div class="num" id="t-total">–</div><div class="lbl">Cameras</div></div>
+      <div class="tile up"><div class="num" id="t-up">–</div><div class="lbl">Serving video</div></div>
+      <div class="tile down"><div class="num" id="t-down">–</div><div class="lbl">Offline</div></div>
+      <div class="tile degraded"><div class="num" id="t-degraded">–</div><div class="lbl">Degraded</div></div>
+      <div class="tile unknown"><div class="num" id="t-unknown">–</div><div class="lbl">Unknown</div></div>
+      <div class="tile health"><div class="num" id="t-health">–</div><div class="lbl">Fleet health</div></div>
+    </div>
+    <div class="bar-wrap"><div class="bar" id="health-bar"><span class="seg up"></span><span class="seg degraded"></span><span class="seg down"></span><span class="seg unknown"></span></div></div>
+
+    <h2>Zones</h2>
+    <div id="groups" class="groups"></div>
+
+    <h2>Not serving video <span class="count" id="bad-count">0</span></h2>
+    <div id="bad-list" class="cards"></div>
+  </section>
+
+  <!-- ============================ CAMERAS ============================= -->
+  <section id="view-cameras" class="view" hidden>
+    <div class="toolbar">
+      <input id="search" type="search" placeholder="Search name, IP, zone…" aria-label="Search cameras" />
+      <select id="filter-status" aria-label="Filter by status">
+        <option value="">All statuses</option>
+        <option value="up">Serving video</option>
+        <option value="down">Offline</option>
+        <option value="degraded">Degraded</option>
+        <option value="unknown">Unknown</option>
+      </select>
+      <select id="filter-group" aria-label="Filter by zone"><option value="">All zones</option></select>
+      <select id="sort" aria-label="Sort">
+        <option value="status">Sort: worst first</option>
+        <option value="name">Sort: name</option>
+        <option value="downtime">Sort: longest down</option>
+        <option value="latency">Sort: slowest</option>
+      </select>
+      <button id="btn-csv" class="btn ghost">⭳ CSV</button>
+    </div>
+    <div class="table-wrap">
+      <table id="camera-table">
+        <thead><tr><th>Status</th><th>Camera</th><th>Zone</th><th>Address</th><th>For</th><th>Latency</th><th>Detail</th><th></th></tr></thead>
+        <tbody id="camera-rows"></tbody>
+      </table>
+    </div>
+    <p class="muted" id="camera-count"></p>
+  </section>
+
+  <!-- ============================= ALARMS ============================= -->
+  <section id="view-alarms" class="view" hidden>
+    <div class="toolbar">
+      <select id="alarm-scope">
+        <option value="annunciated">Needs attention</option>
+        <option value="active">All active</option>
+        <option value="all">Everything in the register</option>
+      </select>
+      <button id="btn-ack-all" class="btn">✓ Acknowledge all</button>
+      <span class="muted" id="alarm-counts"></span>
+    </div>
+    <div id="alarm-list" class="cards"></div>
+
+    <h2>Alarm system performance <span class="muted">EEMUA 191</span></h2>
+    <div id="kpi-verdict" class="banner" hidden></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Metric</th><th class="num">Measured</th><th class="num">Target</th><th>Verdict</th></tr></thead>
+        <tbody id="kpi-rows"></tbody>
+      </table>
+    </div>
+    <h2>Top alarm contributors</h2>
+    <p class="muted">A few conditions usually produce most of the noise — fixing those fixes the alarm system.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Alarm</th><th class="num">Count</th><th class="num">Share</th><th class="num">Devices</th></tr></thead>
+        <tbody id="contributor-rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============================= REPORTS ============================ -->
+  <section id="view-reports" class="view" hidden>
+    <div class="toolbar">
+      <select id="report-preview-format">
+        <option value="text">Text (chat)</option>
+        <option value="html">HTML</option>
+        <option value="csv">CSV register</option>
+        <option value="json">JSON</option>
+      </select>
+      <select id="report-preview-hours">
+        <option value="6" selected>Last 6 hours</option>
+        <option value="24">Last 24 hours</option>
+        <option value="168">Last 7 days</option>
+      </select>
+      <button id="btn-preview-report" class="btn">Preview</button>
+      <button id="btn-issue-report" class="btn primary">Issue &amp; send now</button>
+      <span class="muted" id="report-next"></span>
+    </div>
+    <h2>Reports of record</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Report</th><th>Issued</th><th>Formats</th><th></th></tr></thead>
+        <tbody id="report-rows"></tbody>
+      </table>
+    </div>
+    <pre id="report-preview" class="output" hidden></pre>
+  </section>
+
+  <!-- ============================ TIMELINE ============================ -->
+  <section id="view-timeline" class="view" hidden>
+    <div class="toolbar">
+      <select id="timeline-range">
+        <option value="6">Last 6 hours</option>
+        <option value="24" selected>Last 24 hours</option>
+        <option value="72">Last 3 days</option>
+        <option value="168">Last 7 days</option>
+      </select>
+      <select id="timeline-type">
+        <option value="">All events</option>
+        <option value="camera.down,camera.degraded">Outages only</option>
+        <option value="camera.escalation">Escalations</option>
+        <option value="camera.flapping">Flapping</option>
+        <option value="monitor.stalled,monitor.recovered,monitor.networkDown,monitor.networkUp">Monitor health</option>
+      </select>
+    </div>
+    <ol id="timeline" class="timeline"></ol>
+  </section>
+
+  <!-- ============================= UPTIME ============================= -->
+  <section id="view-uptime" class="view" hidden>
+    <div class="toolbar">
+      <select id="uptime-range">
+        <option value="24" selected>Last 24 hours</option>
+        <option value="168">Last 7 days</option>
+        <option value="720">Last 30 days</option>
+      </select>
+      <span class="muted" id="uptime-summary"></span>
+    </div>
+    <div class="chart-card">
+      <h3>Fleet availability</h3>
+      <div id="trend-chart" class="chart"></div>
+    </div>
+    <h2>Lowest availability</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Camera</th><th>Zone</th><th>Uptime</th><th>Outages</th><th>Total down</th><th>Longest</th><th>MTTR</th></tr></thead>
+        <tbody id="uptime-rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============================= ALERTS ============================= -->
+  <section id="view-alerts" class="view" hidden>
+    <h2>Channels</h2>
+    <div id="channel-list" class="cards"></div>
+    <h2>Delivery queue <span class="count" id="queue-count">0</span></h2>
+    <p class="muted">Messages waiting to be delivered. They survive restarts and retry with backoff.</p>
+    <div id="queue-pending" class="cards"></div>
+    <h2>Recent deliveries</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>When</th><th>Channel</th><th>Alert</th><th>Result</th></tr></thead>
+        <tbody id="delivery-rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============================ SETTINGS ============================ -->
+  <section id="view-settings" class="view" hidden>
+    <div class="split">
+      <div>
+        <h2>Monitoring</h2>
+        <form id="form-monitor" class="form">
+          <label>Probe interval (seconds)<input type="number" name="monitor.intervalSec" min="10" max="3600" /></label>
+          <label>Concurrent probes<input type="number" name="monitor.concurrency" min="1" max="512" /></label>
+          <label>Confirm-down cycles
+            <input type="number" name="detect.confirmDownCycles" min="1" max="10" />
+            <small>How many consecutive failures before an alert. 1 disables flap protection.</small>
+          </label>
+          <label>Confirm-up cycles<input type="number" name="detect.confirmUpCycles" min="1" max="10" /></label>
+          <label class="check"><input type="checkbox" name="detect.treatDegradedAsDown" /> Treat degraded as offline</label>
+          <button class="btn primary" type="submit">Save monitoring</button>
+        </form>
+
+        <h2>Alerting</h2>
+        <form id="form-alerts" class="form">
+          <label class="check"><input type="checkbox" name="alerts.enabled" /> Alerting enabled</label>
+          <label>Minimum severity
+            <select name="alerts.minSeverity"><option value="info">info</option><option value="warning">warning</option><option value="critical">critical</option></select>
+          </label>
+          <label>Coalesce window (seconds)
+            <input type="number" name="alerts.coalesceSec" min="0" max="600" />
+            <small>Merge alerts raised close together into one message.</small>
+          </label>
+          <label>Max alerts per channel per hour<input type="number" name="alerts.maxPerHour" min="0" max="500" /></label>
+          <label class="check"><input type="checkbox" name="alerts.quietHours.enabled" /> Quiet hours</label>
+          <div class="row">
+            <label>From<input type="time" name="alerts.quietHours.from" /></label>
+            <label>To<input type="time" name="alerts.quietHours.to" /></label>
+          </div>
+          <label class="check"><input type="checkbox" name="alerts.digest.enabled" /> Scheduled digests</label>
+          <label>Digest times (comma-separated HH:MM)<input type="text" name="alerts.digest.times" placeholder="09:00, 18:00" /></label>
+          <button class="btn primary" type="submit">Save alerting</button>
+        </form>
+      </div>
+
+      <div>
+        <h2>Credentials</h2>
+        <p class="muted">Stored encrypted in <code>config/secrets.enc</code>. They are never shown again once saved.</p>
+        <form id="form-secret" class="form">
+          <label>Secret name
+            <input type="text" name="path" placeholder="telegram.botToken" required />
+            <small>e.g. <code>cameras.password</code>, <code>telegram.botToken</code>, <code>whatsappGreen.apiToken</code></small>
+          </label>
+          <label>Value<input type="password" name="value" autocomplete="new-password" /></label>
+          <button class="btn" type="submit">Save credential</button>
+        </form>
+        <p class="muted">Stored: <span id="secret-list">—</span></p>
+
+        <h2>Inventory</h2>
+        <form id="form-import" class="form">
+          <label>Import CSV from path on the monitoring PC
+            <input type="text" name="file" placeholder="C:\\corridor\\aiv-export.csv" required />
+            <small>Accepts the AIV-MP export (Camera, Organization, IP, Device, Status) or your own spreadsheet.</small>
+          </label>
+          <button class="btn" type="submit">Import</button>
+        </form>
+        <form id="form-discover" class="form">
+          <label>Discover cameras on a subnet<input type="text" name="cidr" placeholder="192.168.10.0/24" required /></label>
+          <button class="btn" type="submit">Scan subnet</button>
+        </form>
+        <pre id="settings-output" class="output" hidden></pre>
+      </div>
+    </div>
+  </section>
+</main>
+
+<dialog id="report-dialog">
+  <h2>Shareable report</h2>
+  <div class="toolbar">
+    <select id="report-format">
+      <option value="full">Full report</option>
+      <option value="offline">Offline only</option>
+      <option value="summary">Summary counts</option>
+    </select>
+    <button class="btn" id="btn-copy">⧉ Copy</button>
+    <button class="btn" id="btn-send-digest">Send to alert channels</button>
+    <button class="btn ghost" id="btn-close-report">Close</button>
+  </div>
+  <pre id="report-text" class="output"></pre>
+</dialog>
+
+<div id="toast" class="toast" hidden role="status" aria-live="polite"></div>
+<script src="app.js" type="module"></script>
+</body>
+</html>
